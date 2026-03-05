@@ -1,0 +1,140 @@
+import { useState } from "react";
+import { machines, generateMachineTrend, generateProductionTrend } from "@/data/mockData";
+import { MachineCard } from "@/components/MachineCard";
+import { KPICard } from "@/components/KPICard";
+import { Button } from "@/components/ui/button";
+import { ArrowLeft, Zap, Package, Clock, Gauge } from "lucide-react";
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  BarChart, Bar, PieChart, Pie, Cell
+} from "recharts";
+
+const tt = { contentStyle: { backgroundColor: 'hsl(222, 25%, 11%)', border: '1px solid hsl(222, 20%, 18%)', borderRadius: '8px', color: 'hsl(215, 20%, 85%)', fontSize: '12px' } };
+
+export default function MachineMonitoring() {
+  const [selected, setSelected] = useState<string | null>(null);
+  const machine = machines.find(m => m.id === selected);
+
+  if (machine) {
+    const trend = generateMachineTrend(machine.id);
+    const prodData = Array.from({ length: 8 }, (_, i) => ({
+      time: `${(6 + i * 2).toString().padStart(2, '0')}:00`,
+      parts: Math.floor(Math.random() * 25 + 10),
+      energy_per_part: (0.6 + Math.random() * 0.8).toFixed(2),
+    }));
+    const runtimeData = [
+      { name: 'Runtime', value: machine.runtime_hours },
+      { name: 'Idle', value: machine.idle_hours },
+    ];
+
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="icon" onClick={() => setSelected(null)}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">{machine.name}</h1>
+            <p className="text-sm text-muted-foreground">Detailed machine analytics</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <KPICard title="Current Power" value={machine.kW} unit="kW" icon={<Zap className="h-4 w-4" />} variant="primary" />
+          <KPICard title="Energy Today" value={machine.kWh} unit="kWh" />
+          <KPICard title="Parts Today" value={machine.parts_produced} icon={<Package className="h-4 w-4" />} />
+          <KPICard title="Runtime" value={machine.runtime_hours} unit="hrs" icon={<Clock className="h-4 w-4" />} />
+          <KPICard title="Efficiency" value={machine.efficiency_score} unit="/100" icon={<Gauge className="h-4 w-4" />} variant={machine.efficiency_score >= 85 ? 'success' : 'warning'} />
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="chart-container">
+            <h3 className="text-sm font-medium text-foreground mb-4">Power Trend (24h)</h3>
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={trend}>
+                  <defs>
+                    <linearGradient id="drillGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="hsl(187, 80%, 50%)" stopOpacity={0.3} />
+                      <stop offset="100%" stopColor="hsl(187, 80%, 50%)" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 20%, 18%)" />
+                  <XAxis dataKey="time" stroke="hsl(215, 15%, 55%)" fontSize={10} />
+                  <YAxis stroke="hsl(215, 15%, 55%)" fontSize={10} unit=" kW" />
+                  <Tooltip {...tt} />
+                  <Area type="monotone" dataKey="value" stroke="hsl(187, 80%, 50%)" fill="url(#drillGrad)" strokeWidth={2} name="Power (kW)" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="chart-container">
+            <h3 className="text-sm font-medium text-foreground mb-4">Production & Energy/Part</h3>
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={prodData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 20%, 18%)" />
+                  <XAxis dataKey="time" stroke="hsl(215, 15%, 55%)" fontSize={10} />
+                  <YAxis stroke="hsl(215, 15%, 55%)" fontSize={10} />
+                  <Tooltip {...tt} />
+                  <Bar dataKey="parts" fill="hsl(152, 60%, 45%)" name="Parts" radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="chart-container">
+            <h3 className="text-sm font-medium text-foreground mb-4">Runtime vs Idle</h3>
+            <div className="h-56 flex items-center justify-center">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={runtimeData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="value" label={({ name, value }) => `${name}: ${value}h`} fontSize={11}>
+                    <Cell fill="hsl(152, 60%, 45%)" />
+                    <Cell fill="hsl(38, 92%, 50%)" />
+                  </Pie>
+                  <Tooltip {...tt} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="chart-container">
+            <h3 className="text-sm font-medium text-foreground mb-4">Machine Details</h3>
+            <div className="space-y-3">
+              <Detail label="Product Type" value={machine.product_type} />
+              <Detail label="Power Factor" value={machine.pf.toString()} />
+              <Detail label="Voltage (R/Y/B)" value={`${machine.voltage.r}/${machine.voltage.y}/${machine.voltage.b} V`} />
+              <Detail label="Current (R/Y/B)" value={`${machine.current.r}/${machine.current.y}/${machine.current.b} A`} />
+              <Detail label="Rejections" value={machine.rejection_count.toString()} />
+              <Detail label="Energy/Part" value={`${machine.energy_per_part} kWh`} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-foreground">CNC Machine Monitoring</h1>
+        <p className="text-sm text-muted-foreground">Real-time status of all CNC machines</p>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {machines.map(m => (
+          <MachineCard key={m.id} machine={m} onClick={() => setSelected(m.id)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between items-center py-1 border-b border-border last:border-0">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-sm font-mono text-foreground">{value}</span>
+    </div>
+  );
+}

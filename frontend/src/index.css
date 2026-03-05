@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@layer base {
+  :root {
+    --background: 220 20% 97%;
+    --foreground: 220 25% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 25% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 25% 10%;
+
+    --primary: 187 80% 42%;
+    --primary-foreground: 220 30% 8%;
+
+    --secondary: 220 15% 92%;
+    --secondary-foreground: 220 25% 15%;
+
+    --muted: 220 15% 94%;
+    --muted-foreground: 220 10% 45%;
+
+    --accent: 187 80% 42%;
+    --accent-foreground: 220 30% 8%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 15% 88%;
+    --input: 220 15% 88%;
+    --ring: 187 80% 42%;
+
+    --radius: 0.5rem;
+
+    --success: 152 60% 42%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 38 92% 10%;
+    --info: 187 80% 42%;
+    --info-foreground: 0 0% 100%;
+
+    --chart-cyan: 187 80% 50%;
+    --chart-green: 152 60% 45%;
+    --chart-amber: 38 92% 50%;
+    --chart-red: 0 72% 51%;
+    --chart-blue: 217 80% 55%;
+    --chart-purple: 270 60% 55%;
+
+    --sidebar-background: 220 20% 97%;
+    --sidebar-foreground: 220 10% 35%;
+    --sidebar-primary: 187 80% 42%;
+    --sidebar-primary-foreground: 220 30% 8%;
+    --sidebar-accent: 187 80% 95%;
+    --sidebar-accent-foreground: 187 80% 25%;
+    --sidebar-border: 220 15% 90%;
+    --sidebar-ring: 187 80% 42%;
+  }
+
+  .dark {
+    --background: 222 30% 8%;
+    --foreground: 215 20% 85%;
+
+    --card: 222 25% 11%;
+    --card-foreground: 215 20% 85%;
+
+    --popover: 222 25% 11%;
+    --popover-foreground: 215 20% 85%;
+
+    --primary: 187 80% 50%;
+    --primary-foreground: 222 30% 8%;
+
+    --secondary: 222 20% 16%;
+    --secondary-foreground: 215 20% 80%;
+
+    --muted: 222 20% 14%;
+    --muted-foreground: 215 15% 55%;
+
+    --accent: 187 80% 50%;
+    --accent-foreground: 222 30% 8%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 20% 18%;
+    --input: 222 20% 18%;
+    --ring: 187 80% 50%;
+
+    --success: 152 60% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 38 92% 10%;
+    --info: 187 80% 50%;
+    --info-foreground: 0 0% 100%;
+
+    --chart-cyan: 187 80% 55%;
+    --chart-green: 152 60% 50%;
+    --chart-amber: 38 92% 55%;
+    --chart-red: 0 72% 55%;
+    --chart-blue: 217 80% 60%;
+    --chart-purple: 270 60% 60%;
+
+    --sidebar-background: 222 28% 10%;
+    --sidebar-foreground: 215 15% 60%;
+    --sidebar-primary: 187 80% 50%;
+    --sidebar-primary-foreground: 222 30% 8%;
+    --sidebar-accent: 222 25% 15%;
+    --sidebar-accent-foreground: 187 80% 70%;
+    --sidebar-border: 222 20% 16%;
+    --sidebar-ring: 187 80% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer components {
+  .glow-cyan {
+    box-shadow: 0 0 20px -5px hsl(var(--primary) / 0.3);
+  }
+
+  .glow-success {
+    box-shadow: 0 0 15px -5px hsl(var(--success) / 0.4);
+  }
+
+  .glow-warning {
+    box-shadow: 0 0 15px -5px hsl(var(--warning) / 0.4);
+  }
+
+  .glow-destructive {
+    box-shadow: 0 0 15px -5px hsl(var(--destructive) / 0.4);
+  }
+
+  .status-running {
+    @apply bg-success text-success-foreground;
+  }
+
+  .status-idle {
+    @apply bg-warning text-warning-foreground;
+  }
+
+  .status-maintenance {
+    @apply bg-destructive text-destructive-foreground;
+  }
+
+  .kpi-card {
+    @apply rounded-lg border bg-card p-4 transition-all duration-200 hover:glow-cyan;
+  }
+
+  .insight-card {
+    @apply rounded-lg border bg-card p-4 border-l-4;
+  }
+
+  .chart-container {
+    @apply rounded-lg border bg-card p-4;
+  }
+}
+
+@layer utilities {
+  .text-gradient-cyan {
+    @apply bg-gradient-to-r from-primary to-info bg-clip-text text-transparent;
+  }
+}
