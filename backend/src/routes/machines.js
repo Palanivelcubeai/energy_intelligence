@@ -67,8 +67,7 @@ router.put("/:id/config", async (req, res) => {
     const { name, rated_power_kw, production_target, status } = req.body;
     const { rows } = await pool.query(
       `UPDATE machines SET name = COALESCE($1, name), rated_power_kw = COALESCE($2, rated_power_kw),
-       production_target = COALESCE($3, production_target), status = COALESCE($4, status),
-       updated_at = NOW()
+       production_target = COALESCE($3, production_target), status = COALESCE($4, status)
        WHERE id = $5 RETURNING *`,
       [name, rated_power_kw, production_target, status, req.params.id]
     );

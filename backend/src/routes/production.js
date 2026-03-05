@@ -5,12 +5,12 @@ const pool = require("../db");
 router.get("/by-machine", async (req, res) => {
   try {
     const { from, to } = req.query;
-    let query = `SELECT machine_id, SUM(production) AS total_parts, SUM(energy_kwh) AS total_energy,
+    let query = `SELECT machine_id, SUM(parts_produced) AS total_parts, SUM(kwh) AS total_energy,
                    AVG(efficiency_score) AS avg_efficiency
-                 FROM energy_output_daily`;
+                 FROM machine_metrics`;
     const params = [];
     if (from && to) {
-      query += " WHERE record_date BETWEEN $1 AND $2";
+      query += " WHERE recorded_at::date BETWEEN $1 AND $2";
       params.push(from, to);
     }
     query += " GROUP BY machine_id ORDER BY machine_id";
@@ -26,13 +26,17 @@ router.get("/by-machine", async (req, res) => {
 router.get("/by-shift", async (req, res) => {
   try {
     const { from, to } = req.query;
-    let query = `SELECT shift, machine_id, SUM(parts_produced) AS parts_produced,
-                   SUM(parts_rejected) AS parts_rejected, SUM(production_target) AS production_target,
-                   ROUND(AVG(efficiency_pct)) AS efficiency_pct
-                 FROM shift_production`;
+    let query = `SELECT
+                   CASE WHEN EXTRACT(HOUR FROM recorded_at) BETWEEN 6 AND 13 THEN 'Morning'
+                        WHEN EXTRACT(HOUR FROM recorded_at) BETWEEN 14 AND 21 THEN 'Afternoon'
+                        ELSE 'Night' END AS shift,
+                   machine_id, SUM(parts_produced) AS parts_produced,
+                   SUM(rejection_count) AS parts_rejected,
+                   ROUND(AVG(efficiency_score)) AS efficiency_pct
+                 FROM machine_metrics`;
     const params = [];
     if (from && to) {
-      query += " WHERE record_date BETWEEN $1 AND $2";
+      query += " WHERE recorded_at::date BETWEEN $1 AND $2";
       params.push(from, to);
     }
     query += " GROUP BY shift, machine_id ORDER BY shift, machine_id";
@@ -55,12 +59,12 @@ router.get("/by-shift", async (req, res) => {
 router.get("/monthly", async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT month, total_production AS production, total_energy_kwh AS energy
-       FROM monthly_production ORDER BY year, 
-       CASE month WHEN 'Jan' THEN 1 WHEN 'Feb' THEN 2 WHEN 'Mar' THEN 3
-       WHEN 'Apr' THEN 4 WHEN 'May' THEN 5 WHEN 'Jun' THEN 6
-       WHEN 'Jul' THEN 7 WHEN 'Aug' THEN 8 WHEN 'Sep' THEN 9
-       WHEN 'Oct' THEN 10 WHEN 'Nov' THEN 11 WHEN 'Dec' THEN 12 END`
+      `SELECT TO_CHAR(recorded_at, 'Mon') AS month,
+              SUM(parts_produced) AS production, SUM(kwh) AS energy
+       FROM machine_metrics
+       WHERE recorded_at >= DATE_TRUNC('year', NOW())
+       GROUP BY EXTRACT(MONTH FROM recorded_at), TO_CHAR(recorded_at, 'Mon')
+       ORDER BY EXTRACT(MONTH FROM recorded_at)`
     );
     res.json(rows);
   } catch (err) {
@@ -73,14 +77,14 @@ router.get("/monthly", async (_req, res) => {
 router.get("/weekly", async (req, res) => {
   try {
     const { from, to } = req.query;
-    let query = `SELECT record_date, SUM(production) AS production, SUM(energy_kwh) AS energy
-                 FROM energy_output_daily`;
+    let query = `SELECT recorded_at::date AS record_date, SUM(parts_produced) AS production, SUM(kwh) AS energy
+                 FROM machine_metrics`;
     const params = [];
     if (from && to) {
-      query += " WHERE record_date BETWEEN $1 AND $2";
+      query += " WHERE recorded_at::date BETWEEN $1 AND $2";
       params.push(from, to);
     }
-    query += " GROUP BY record_date ORDER BY record_date";
+    query += " GROUP BY recorded_at::date ORDER BY recorded_at::date";
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) {
