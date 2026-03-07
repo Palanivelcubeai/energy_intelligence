@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Eye, EyeOff, AlertCircle } from "lucide-react";
-import loginBg from "@/assets/login-bg.jpg";
 import appIcon from "/clean.png";
 
 export default function Login() {
@@ -26,8 +25,7 @@ export default function Login() {
     e.preventDefault();
     setError(null);
     setLoading(true);
-    await new Promise((r) => setTimeout(r, 400));
-    const err = login(email, password, rememberMe);
+    const err = await login(email, password, rememberMe);
     setLoading(false);
     if (err) {
       setError(err);
@@ -41,7 +39,7 @@ export default function Login() {
       {/* Background Image */}
       <div
         className="absolute inset-0 bg-cover bg-center bg-no-repeat animate-fade-in"
-        style={{ backgroundImage: `url(${loginBg})` }}
+        style={{ backgroundImage: `url(/login-bg-BA3dPpky.jpg)` }}
       />
       {/* Dark Overlay */}
       <div className="absolute inset-0 bg-black/50" />

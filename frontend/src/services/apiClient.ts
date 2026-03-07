@@ -9,6 +9,14 @@ export const apiClient = axios.create({
   },
 });
 
+// Attach JWT token to every request
+apiClient.interceptors.request.use((config) => {
+  const token =
+    localStorage.getItem("token") || sessionStorage.getItem("token");
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
 // Response interceptor for global error handling
 apiClient.interceptors.response.use(
   (response) => response,
@@ -16,8 +24,10 @@ apiClient.interceptors.response.use(
     const status = error.response?.status;
 
     if (status === 401) {
-      localStorage.removeItem("auth");
-      sessionStorage.removeItem("auth");
+      ["isAuthenticated", "role", "name", "email", "token"].forEach((k) => {
+        localStorage.removeItem(k);
+        sessionStorage.removeItem(k);
+      });
       window.location.href = "/login";
     } else if (status && status >= 500) {
       toast.error("Server error. Please try again later.");

@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
-import { type UserRole, authenticate } from "@/lib/authConfig";
+import { type UserRole } from "@/lib/authConfig";
+import { apiClient } from "@/services/apiClient";
 
 interface AuthState {
   isAuthenticated: boolean;
@@ -7,6 +8,8 @@ interface AuthState {
   name: string | null;
   email: string | null;
 }
+
+const AUTH_KEYS = ["isAuthenticated", "role", "name", "email", "token"] as const;
 
 function getStorage(): Storage {
   // If localStorage has auth, use it (remember me was on)
@@ -35,37 +38,37 @@ export function useAuth() {
     return () => window.removeEventListener("storage", handler);
   }, []);
 
-  const login = useCallback((email: string, password: string, rememberMe: boolean = true): string | null => {
-    const user = authenticate(email, password);
-    if (!user) return "Invalid email or password";
-    const s = rememberMe ? localStorage : sessionStorage;
-    // Clear both first
-    localStorage.removeItem("isAuthenticated");
-    localStorage.removeItem("role");
-    localStorage.removeItem("name");
-    localStorage.removeItem("email");
-    sessionStorage.removeItem("isAuthenticated");
-    sessionStorage.removeItem("role");
-    sessionStorage.removeItem("name");
-    sessionStorage.removeItem("email");
-    // Set in chosen storage
-    s.setItem("isAuthenticated", "true");
-    s.setItem("role", user.role);
-    s.setItem("name", user.name);
-    s.setItem("email", user.email);
-    setAuth({ isAuthenticated: true, role: user.role, name: user.name, email: user.email });
-    return null;
+  const login = useCallback(async (email: string, password: string, rememberMe: boolean = true): Promise<string | null> => {
+    try {
+      const response = await apiClient.post("/auth/login", { email, password });
+      const { token, user } = response.data;
+
+      const s = rememberMe ? localStorage : sessionStorage;
+      // Clear both storages first
+      AUTH_KEYS.forEach((k) => {
+        localStorage.removeItem(k);
+        sessionStorage.removeItem(k);
+      });
+      // Normalize role to lowercase to match roleAccess keys
+      const role = (user.role as string).toLowerCase() as UserRole;
+      s.setItem("isAuthenticated", "true");
+      s.setItem("role", role);
+      s.setItem("name", user.name);
+      s.setItem("email", user.email);
+      s.setItem("token", token);
+      setAuth({ isAuthenticated: true, role, name: user.name, email: user.email });
+      return null;
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { data?: { error?: string } } };
+      return axiosErr.response?.data?.error || "Invalid email or password";
+    }
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem("isAuthenticated");
-    localStorage.removeItem("role");
-    localStorage.removeItem("name");
-    localStorage.removeItem("email");
-    sessionStorage.removeItem("isAuthenticated");
-    sessionStorage.removeItem("role");
-    sessionStorage.removeItem("name");
-    sessionStorage.removeItem("email");
+    AUTH_KEYS.forEach((k) => {
+      localStorage.removeItem(k);
+      sessionStorage.removeItem(k);
+    });
     setAuth({ isAuthenticated: false, role: null, name: null, email: null });
   }, []);
 

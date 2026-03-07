@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,32 +9,59 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose
 } from "@/components/ui/dialog";
 import { Users, Plus, Pencil, Trash2 } from "lucide-react";
-import { defaultUsers, type UserRecord } from "@/data/carbonData";
+import { type UserRecord } from "@/data/carbonData";
 import { useToast } from "@/hooks/use-toast";
+import { apiClient } from "@/services/apiClient";
 
 export default function Admin() {
   const { toast } = useToast();
-  const [users, setUsers] = useState<UserRecord[]>(defaultUsers.map(u => ({ ...u })));
-  const [newUser, setNewUser] = useState({ name: "", email: "", role: "Operator" as UserRecord["role"] });
+  const [users, setUsers] = useState<UserRecord[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(true);
+  const [newUser, setNewUser] = useState({ name: "", email: "", role: "Operator" as UserRecord["role"], password: "Energy@321" });
   const [editUser, setEditUser] = useState<UserRecord | null>(null);
 
-  const addUser = () => {
+  useEffect(() => {
+    apiClient.get("/auth/users")
+      .then(res => setUsers(res.data.map((u: UserRecord & { id: number }) => ({ ...u, id: String(u.id) }))))
+      .catch(() => toast({ title: "Failed to load users", variant: "destructive" }))
+      .finally(() => setLoadingUsers(false));
+  }, []);
+
+  const addUser = async () => {
     if (!newUser.name || !newUser.email) return;
-    setUsers(prev => [...prev, { ...newUser, id: Date.now().toString() }]);
-    setNewUser({ name: "", email: "", role: "Operator" });
-    toast({ title: "User Added", description: `${newUser.name} added as ${newUser.role}` });
+    try {
+      const res = await apiClient.post("/auth/users", newUser);
+      setUsers(prev => [...prev, { ...res.data, id: String(res.data.id) }]);
+      setNewUser({ name: "", email: "", role: "Operator", password: "Energy@321" });
+      toast({ title: "User Added", description: `${newUser.name} added as ${newUser.role}` });
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { error?: string } } };
+      toast({ title: "Error", description: e.response?.data?.error || "Failed to add user", variant: "destructive" });
+    }
   };
 
-  const saveEditUser = () => {
+  const saveEditUser = async () => {
     if (!editUser) return;
-    setUsers(prev => prev.map(u => u.id === editUser.id ? editUser : u));
-    setEditUser(null);
-    toast({ title: "User Updated", description: `${editUser.name} has been updated.` });
+    try {
+      const res = await apiClient.put(`/auth/users/${editUser.id}`, editUser);
+      setUsers(prev => prev.map(u => u.id === editUser.id ? { ...res.data, id: String(res.data.id) } : u));
+      setEditUser(null);
+      toast({ title: "User Updated", description: `${editUser.name} has been updated.` });
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { error?: string } } };
+      toast({ title: "Error", description: e.response?.data?.error || "Failed to update user", variant: "destructive" });
+    }
   };
 
-  const deleteUser = (id: string) => {
-    setUsers(prev => prev.filter(u => u.id !== id));
-    toast({ title: "User Removed" });
+  const deleteUser = async (id: string) => {
+    try {
+      await apiClient.delete(`/auth/users/${id}`);
+      setUsers(prev => prev.filter(u => u.id !== id));
+      toast({ title: "User Removed" });
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { error?: string } } };
+      toast({ title: "Error", description: e.response?.data?.error || "Failed to delete user", variant: "destructive" });
+    }
   };
 
   const roleColor = (role: UserRecord["role"]) => {
@@ -84,6 +111,10 @@ export default function Admin() {
                   <Input type="email" value={newUser.email} onChange={e => setNewUser(p => ({ ...p, email: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
+                  <Label className="text-xs">Password</Label>
+                  <Input type="password" value={newUser.password} placeholder="Energy@321" onChange={e => setNewUser(p => ({ ...p, password: e.target.value }))} />
+                </div>
+                <div className="space-y-1.5">
                   <Label className="text-xs">Role</Label>
                   <Select value={newUser.role} onValueChange={v => setNewUser(p => ({ ...p, role: v as UserRecord["role"] }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -108,7 +139,9 @@ export default function Admin() {
         </div>
 
         <div className="space-y-2">
-          {users.map(u => (
+          {loadingUsers ? (
+            <p className="text-sm text-muted-foreground text-center py-4">Loading users…</p>
+          ) : users.map(u => (
             <div key={u.id} className="flex items-center justify-between p-3 rounded-md bg-secondary/30">
               <div className="flex items-center gap-3">
                 <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary">

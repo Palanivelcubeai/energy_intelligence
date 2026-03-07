@@ -1,0 +1,22 @@
+user1
+
+Name-palanivel
+role-admin
+mail id-admin@gmail.com
+password- Admin@321
+
+
+user2
+
+name-karmesh
+role-manager
+mailid-manager@gmail.com
+password- Manager@321
+
+
+user3
+
+name-madhan
+role-operator
+mailid-operator@gmail.com
+password- Operator@321
