@@ -16,6 +16,7 @@ export default function MachineMonitoring() {
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [trend, setTrend] = useState<{ time: string; value: number }[]>([]);
+  const [prodData, setProdData] = useState<{ time: string; parts: number; energy_per_part: string }[]>([]);
 
   // Auto-poll machines every 3 seconds for live updates
   useEffect(() => {
@@ -42,14 +43,26 @@ export default function MachineMonitoring() {
     return () => clearInterval(interval);
   }, [selected]);
 
+  // Fetch hourly production data — poll every 30s (no need for 3s here)
+  useEffect(() => {
+    if (!selected) return;
+    const fetchProd = () =>
+      apiClient.get('/metrics/production-trend').then(r => {
+        const data = r.data.map((p: { time: string; production: number; energy: number }) => ({
+          time: p.time,
+          parts: p.production,
+          energy_per_part: p.production > 0 ? (p.energy / p.production).toFixed(2) : '0.00',
+        }));
+        setProdData(data);
+      }).catch(() => {});
+    fetchProd();
+    const interval = setInterval(fetchProd, 30000);
+    return () => clearInterval(interval);
+  }, [selected]);
+
   const machine = machines.find(m => m.id === selected);
 
   if (machine) {
-    const prodData = Array.from({ length: 8 }, (_, i) => ({
-      time: `${(6 + i * 2).toString().padStart(2, '0')}:00`,
-      parts: Math.floor(Math.random() * 25 + 10),
-      energy_per_part: (0.6 + Math.random() * 0.8).toFixed(2),
-    }));
     const runtimeData = [
       { name: 'Runtime', value: machine.runtime_hours },
       { name: 'Idle', value: machine.idle_hours },

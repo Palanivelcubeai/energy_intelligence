@@ -10,7 +10,7 @@ const severityConfig = {
 };
 
 export function InsightCard({ insight, compact = false }: { insight: InsightData; compact?: boolean }) {
-  const config = severityConfig[insight.severity];
+  const config = severityConfig[insight.severity] ?? severityConfig.info;
   const Icon = config.icon;
 
   if (compact) {

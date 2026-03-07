@@ -11,9 +11,11 @@ import {
 import { apiClient } from "@/services/apiClient";
 import type { SystemConfig, MachineConfig } from "@/data/carbonData";
 import { useToast } from "@/hooks/use-toast";
+import { usePlantConfig } from "@/context/PlantConfigContext";
 
 export default function AdminConfig() {
   const { toast } = useToast();
+  const { setPlantName } = usePlantConfig();
   const [config, setConfig] = useState<SystemConfig>({
     plantName: '', location: '', industryType: '', machineCount: 0,
     tariffPerKwh: 0, contractDemand: 0, gridEmissionFactor: 0, demandPenaltyRate: 0,
@@ -48,6 +50,7 @@ export default function AdminConfig() {
           name: m.name, rated_power_kw: m.ratedPower, production_target: m.productionTarget, status: m.status,
         })
       ));
+      if (config.plantName) setPlantName(config.plantName);
       toast({
         title: "Configuration Saved",
         description: "All settings have been applied. Dashboards will reflect changes.",
@@ -58,7 +61,7 @@ export default function AdminConfig() {
   };
 
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div className="space-y-6">
       <div className="flex items-center gap-3">
         <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
           <Shield className="h-6 w-6 text-primary" />
@@ -69,39 +72,74 @@ export default function AdminConfig() {
         </div>
       </div>
 
-      {/* A. Plant Configuration */}
-      <div className="kpi-card space-y-4">
-        <div className="flex items-center gap-2">
-          <Building2 className="h-4 w-4 text-primary" />
-          <h3 className="text-sm font-semibold text-foreground">Plant Configuration</h3>
+      {/* Row 1: Plant Config + Alert Thresholds side by side */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+
+        {/* A. Plant Configuration */}
+        <div className="kpi-card space-y-4">
+          <div className="flex items-center gap-2">
+            <Building2 className="h-4 w-4 text-primary" />
+            <h3 className="text-sm font-semibold text-foreground">Plant Configuration</h3>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Plant Name</Label>
+              <Input value={config.plantName} onChange={e => updateConfig('plantName', e.target.value)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Location</Label>
+              <Input value={config.location} onChange={e => updateConfig('location', e.target.value)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Industry Type</Label>
+              <Input value={config.industryType} onChange={e => updateConfig('industryType', e.target.value)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">CNC Machine Count</Label>
+              <Input type="number" value={config.machineCount} onChange={e => updateConfig('machineCount', parseInt(e.target.value) || 0)} className="font-mono" />
+            </div>
+          </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Plant Name</Label>
-            <Input value={config.plantName} onChange={e => updateConfig('plantName', e.target.value)} className="font-mono" />
+
+        {/* D. Alert Thresholds */}
+        <div className="kpi-card space-y-4">
+          <div className="flex items-center gap-2">
+            <Bell className="h-4 w-4 text-warning" />
+            <h3 className="text-sm font-semibold text-foreground">Alert Threshold Settings</h3>
           </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Location</Label>
-            <Input value={config.location} onChange={e => updateConfig('location', e.target.value)} className="font-mono" />
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Min Power Factor</Label>
+              <Input type="number" step="0.01" value={config.pfMinimum} onChange={e => updateConfig('pfMinimum', parseFloat(e.target.value) || 0)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Max THD (%)</Label>
+              <Input type="number" value={config.thdMaximum} onChange={e => updateConfig('thdMaximum', parseFloat(e.target.value) || 0)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Idle Time Threshold (hrs)</Label>
+              <Input type="number" step="0.5" value={config.idleTimeThreshold} onChange={e => updateConfig('idleTimeThreshold', parseFloat(e.target.value) || 0)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Demand Warning (%)</Label>
+              <Input type="number" value={config.demandWarningPercent} onChange={e => updateConfig('demandWarningPercent', parseFloat(e.target.value) || 0)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5 col-span-2">
+              <Label className="text-xs text-muted-foreground">Energy/Part Deviation (%)</Label>
+              <Input type="number" value={config.energyPerPartDeviation} onChange={e => updateConfig('energyPerPartDeviation', parseFloat(e.target.value) || 0)} className="font-mono" />
+            </div>
           </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Industry Type</Label>
-            <Input value={config.industryType} onChange={e => updateConfig('industryType', e.target.value)} className="font-mono" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">CNC Machine Count</Label>
-            <Input type="number" value={config.machineCount} onChange={e => updateConfig('machineCount', parseInt(e.target.value) || 0)} className="font-mono" />
-          </div>
+          <p className="text-[10px] text-muted-foreground">These thresholds affect AI insight generation and alarm triggers across the platform.</p>
         </div>
       </div>
 
-      {/* B. Energy Configuration */}
+      {/* Row 2: Energy Configuration full width */}
       <div className="kpi-card space-y-4">
         <div className="flex items-center gap-2">
           <Zap className="h-4 w-4 text-primary" />
           <h3 className="text-sm font-semibold text-foreground">Energy Configuration</h3>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
           <div className="space-y-1.5">
             <Label className="text-xs text-muted-foreground">Tariff (₹/kWh)</Label>
             <Input type="number" step="0.1" value={config.tariffPerKwh} onChange={e => updateConfig('tariffPerKwh', parseFloat(e.target.value) || 0)} className="font-mono" />
@@ -126,7 +164,7 @@ export default function AdminConfig() {
         <p className="text-[10px] text-muted-foreground">Changes to emission factor and tariff dynamically recalculate Carbon, Cost, and AI Insight pages.</p>
       </div>
 
-      {/* C. Machine Configuration */}
+      {/* Row 3: Machine Configuration full width */}
       <div className="kpi-card space-y-4">
         <div className="flex items-center gap-2">
           <Cpu className="h-4 w-4 text-primary" />
@@ -151,10 +189,10 @@ export default function AdminConfig() {
                     <Input value={m.name} onChange={e => updateMachine(m.id, 'name', e.target.value)} className="h-8 text-xs font-mono" />
                   </TableCell>
                   <TableCell>
-                    <Input type="number" value={m.ratedPower} onChange={e => updateMachine(m.id, 'ratedPower', parseFloat(e.target.value) || 0)} className="h-8 text-xs font-mono w-20" />
+                    <Input type="number" value={m.ratedPower} onChange={e => updateMachine(m.id, 'ratedPower', parseFloat(e.target.value) || 0)} className="h-8 text-xs font-mono w-24" />
                   </TableCell>
                   <TableCell>
-                    <Input type="number" value={m.productionTarget} onChange={e => updateMachine(m.id, 'productionTarget', parseInt(e.target.value) || 0)} className="h-8 text-xs font-mono w-24" />
+                    <Input type="number" value={m.productionTarget} onChange={e => updateMachine(m.id, 'productionTarget', parseInt(e.target.value) || 0)} className="h-8 text-xs font-mono w-28" />
                   </TableCell>
                   <TableCell>
                     <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${
@@ -166,37 +204,6 @@ export default function AdminConfig() {
             </TableBody>
           </Table>
         </div>
-      </div>
-
-      {/* D. Alert Thresholds */}
-      <div className="kpi-card space-y-4">
-        <div className="flex items-center gap-2">
-          <Bell className="h-4 w-4 text-warning" />
-          <h3 className="text-sm font-semibold text-foreground">Alert Threshold Settings</h3>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Min Power Factor</Label>
-            <Input type="number" step="0.01" value={config.pfMinimum} onChange={e => updateConfig('pfMinimum', parseFloat(e.target.value) || 0)} className="font-mono" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Max THD (%)</Label>
-            <Input type="number" value={config.thdMaximum} onChange={e => updateConfig('thdMaximum', parseFloat(e.target.value) || 0)} className="font-mono" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Idle Time Threshold (hrs)</Label>
-            <Input type="number" step="0.5" value={config.idleTimeThreshold} onChange={e => updateConfig('idleTimeThreshold', parseFloat(e.target.value) || 0)} className="font-mono" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Demand Warning (%)</Label>
-            <Input type="number" value={config.demandWarningPercent} onChange={e => updateConfig('demandWarningPercent', parseFloat(e.target.value) || 0)} className="font-mono" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Energy/Part Deviation (%)</Label>
-            <Input type="number" value={config.energyPerPartDeviation} onChange={e => updateConfig('energyPerPartDeviation', parseFloat(e.target.value) || 0)} className="font-mono" />
-          </div>
-        </div>
-        <p className="text-[10px] text-muted-foreground">These thresholds affect AI insight generation and alarm triggers across the platform.</p>
       </div>
 
       <Button className="gap-2" onClick={handleSave}>

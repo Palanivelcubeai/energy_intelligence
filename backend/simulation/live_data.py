@@ -121,10 +121,13 @@ def get_daily_totals(cur, machine_id, today_start):
                   COALESCE(MAX(parts_produced), 0),
                   COALESCE(MAX(rejection_count), 0),
                   COALESCE(MAX(runtime_hours), 0),
-                  COALESCE(MAX(idle_hours), 0)
+                  COALESCE(MAX(idle_hours), 0),
+                  COALESCE((SELECT energy_per_part FROM machine_metrics
+                             WHERE machine_id = %s AND recorded_at >= %s
+                             ORDER BY recorded_at DESC LIMIT 1), 0)
            FROM machine_metrics
            WHERE machine_id = %s AND recorded_at >= %s""",
-        (machine_id, today_start),
+        (machine_id, today_start, machine_id, today_start),
     )
     return cur.fetchone()
 
@@ -146,6 +149,7 @@ def generate_reading(machine_id, profile, now, cur):
     daily_rejections = int(row[3])
     daily_runtime = float(row[4])
     daily_idle = float(row[5])
+    last_epp = float(row[6])
 
     # Determine machine status
     if load_factor <= 0.05:
@@ -237,7 +241,11 @@ def generate_reading(machine_id, profile, now, cur):
     total_rejections = daily_rejections + new_rejections
     total_runtime = round(daily_runtime + runtime_inc, 2)
     total_idle = round(daily_idle + idle_inc, 2)
-    epp = round(total_kwh / total_parts, 2) if total_parts > 0 else 0.0
+    # Only recalculate epp when a new part is produced; otherwise hold the last stored value
+    if total_parts > 0 and new_parts > 0:
+        epp = round(total_kwh / total_parts, 2)
+    else:
+        epp = last_epp
 
     # Efficiency: varies with load, rejections, runtime, and random jitter
     eff_jitter = random.randint(-5, 5)

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
+import { usePlantConfig } from "@/context/PlantConfigContext";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -12,12 +13,20 @@ import {
 
 export function DashboardLayout({ children }: { children: React.ReactNode }) {
   const [isDark, setIsDark] = useState(false);
+  const [now, setNow] = useState(new Date());
+  const { plantName } = usePlantConfig();
   const { name, role, logout } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
   }, [isDark]);
+
+  // Tick the clock every second
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const handleLogout = () => {
     logout();
@@ -33,11 +42,11 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-2">
               <SidebarTrigger className="text-muted-foreground" />
               <div className="h-4 w-px bg-border" />
-              <span className="text-xs text-muted-foreground font-mono">PLANT: UNIT-01 PRECISION MFG</span>
+              <span className="text-xs text-muted-foreground font-mono">PLANT: {plantName.toUpperCase()}</span>
             </div>
             <div className="flex items-center gap-3">
               <span className="text-xs text-muted-foreground font-mono hidden sm:inline">
-                LIVE • {new Date().toLocaleTimeString()}
+                LIVE • {now.toLocaleTimeString()}
               </span>
               <div className="flex items-center gap-1 px-2 py-1 rounded-md bg-success/10">
                 <div className="h-1.5 w-1.5 rounded-full bg-success animate-pulse-glow" />

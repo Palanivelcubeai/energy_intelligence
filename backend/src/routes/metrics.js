@@ -62,7 +62,7 @@ router.get("/realtime", async (_req, res) => {
       kW: parseFloat(r.kW) || 0,
       kWh: parseFloat(r.kWh) || 0,
       pf: parseFloat(r.pf) || 0,
-      voltage: { r: r.voltage_r || 0, y: r.voltage_y || 0, b: r.voltage_b || 0 },
+      voltage: { r: parseFloat(r.voltage_r) || 0, y: parseFloat(r.voltage_y) || 0, b: parseFloat(r.voltage_b) || 0 },
       current: { r: parseFloat(r.current_r) || 0, y: parseFloat(r.current_y) || 0, b: parseFloat(r.current_b) || 0 },
       runtime_hours: parseFloat(r.runtime_hours) || 0,
       idle_hours: parseFloat(r.idle_hours) || 0,
