@@ -106,12 +106,16 @@ def main():
 
         # Set default rated power values for existing machines
         print("\nSetting default rated power and production targets...")
+        # Targets = parts_per_hour × 16 active hours/day × machine efficiency factor
+        # CNC-1: 18 ph × 16h × 0.92 = 265  | CNC-2: 16 × 16 × 0.89 = 228
+        # CNC-3: 12 × 16 × 0.85 = 163       | CNC-4: 20 × 16 × 0.94 = 301
+        # CNC-5: 14 × 16 × 0.90 = 202
         defaults = {
-            "CNC-1": (18.5, 300),
-            "CNC-2": (22.0, 250),
-            "CNC-3": (14.0, 200),
-            "CNC-4": (15.8, 350),
-            "CNC-5": (13.0, 240),
+            "CNC-1": (18.5, 265),
+            "CNC-2": (22.0, 228),
+            "CNC-3": (14.0, 163),
+            "CNC-4": (15.8, 301),
+            "CNC-5": (13.0, 202),
         }
         for machine_id, (power, target) in defaults.items():
             cur.execute(

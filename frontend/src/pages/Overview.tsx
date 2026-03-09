@@ -30,6 +30,7 @@ export default function Overview() {
   const [prodTrend, setProdTrend] = useState<{ time: string; production: number; energy: number }[]>([]);
   const [monthlyProduction, setMonthlyProduction] = useState<{ month: string; production: number }[]>([]);
   const [topInsights, setTopInsights] = useState<InsightData[]>([]);
+  const [kpis, setKpis] = useState({ maxDemand: 0, monthlyProduction: 0, avgEfficiency: 0 });
 
   // Auto-poll live data every 3 seconds
   useEffect(() => {
@@ -47,6 +48,7 @@ export default function Overview() {
   useEffect(() => {
     apiClient.get("/production/monthly").then(r => setMonthlyProduction(r.data)).catch(() => {});
     apiClient.get("/insights/top").then(r => setTopInsights(r.data)).catch(() => {});
+    apiClient.get("/metrics/kpis").then(r => setKpis(r.data)).catch(() => {});
   }, []);
 
   const totalEnergy = machines.reduce((s, m) => s + m.kWh, 0);
@@ -67,10 +69,10 @@ export default function Overview() {
         <KPICard title="Parts Produced" value={totalParts} icon={<Package className="h-4 w-4" />} trend={{ value: 5.8, label: 'vs yesterday' }} />
         <KPICard title="Avg Energy/Part" value={(totalEnergy / totalParts).toFixed(2)} unit="kWh" icon={<Gauge className="h-4 w-4" />} trend={{ value: -1.5, label: 'improvement' }} />
         <KPICard title="Current Load" value={totalLoad.toFixed(1)} unit="kW" icon={<Activity className="h-4 w-4" />} variant="primary" />
-        <KPICard title="Max Demand" value="82.4" unit="kVA" icon={<TrendingUp className="h-4 w-4" />} variant="warning" />
-        <KPICard title="Monthly Production" value="16,800" icon={<Factory className="h-4 w-4" />} trend={{ value: 8.2, label: 'vs last month' }} />
+        <KPICard title="Max Demand" value={kpis.maxDemand.toFixed(1)} unit="kVA" icon={<TrendingUp className="h-4 w-4" />} variant="warning" />
+        <KPICard title="Monthly Production" value={kpis.monthlyProduction.toLocaleString()} icon={<Factory className="h-4 w-4" />} />
         <KPICard title="Energy Cost Today" value={`₹${(totalEnergy * 8.5).toFixed(0)}`} icon={<DollarSign className="h-4 w-4" />} trend={{ value: -2.1, label: 'vs yesterday' }} />
-        <KPICard title="Plant Efficiency" value="84" unit="/100" icon={<BarChart3 className="h-4 w-4" />} variant="success" />
+        <KPICard title="Plant Efficiency" value={kpis.avgEfficiency} unit="/100" icon={<BarChart3 className="h-4 w-4" />} variant="success" />
       </div>
 
       {/* Charts Row */}

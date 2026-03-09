@@ -5,18 +5,37 @@ const pool = require("../db");
 router.get("/by-machine", async (req, res) => {
   try {
     const { from, to } = req.query;
-    let query = `SELECT e.record_date AS date, e.machine_id AS machine, m.name AS "machineName",
-                   e.energy_kwh AS energy, e.production, e.runtime_hours, e.idle_hours,
-                   e.energy_per_part, e.cost_per_part, e.efficiency_score, e.status
-                 FROM energy_output_daily e
-                 JOIN machines m ON m.id = e.machine_id`;
     const params = [];
+    let where = "";
     if (from && to) {
-      query += " WHERE e.record_date BETWEEN $1 AND $2";
+      where = "WHERE p.record_date BETWEEN $1 AND $2";
       params.push(from, to);
     }
-    query += " ORDER BY e.record_date DESC, e.machine_id";
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(
+      `SELECT
+         p.record_date                          AS date,
+         p.machine_id                           AS machine,
+         m.name                                 AS "machineName",
+         ROUND(SUM(p.energy_kwh_used)::numeric, 2)  AS energy,
+         SUM(p.parts_produced)                  AS production,
+         ROUND(SUM(p.runtime_hours)::numeric, 2) AS runtime_hours,
+         ROUND(SUM(p.idle_hours)::numeric, 2)    AS idle_hours,
+         CASE WHEN SUM(p.parts_produced) > 0
+              THEN ROUND(SUM(p.energy_kwh_used) / SUM(p.parts_produced), 2)
+              ELSE 0 END                         AS energy_per_part,
+         CASE WHEN SUM(p.parts_produced) > 0
+              THEN ROUND(SUM(p.energy_kwh_used) / SUM(p.parts_produced) * sc.tariff_per_kwh, 2)
+              ELSE 0 END                         AS cost_per_part,
+         ROUND(AVG(p.efficiency_score))          AS efficiency_score,
+         m.status
+       FROM machine_parts_produced p
+       JOIN machines m ON m.id = p.machine_id
+       CROSS JOIN system_config sc
+       ${where}
+       GROUP BY p.record_date, p.machine_id, m.name, m.status, sc.tariff_per_kwh
+       ORDER BY p.record_date DESC, p.machine_id`,
+      params
+    );
     res.json(rows);
   } catch (err) {
     console.error("GET /energy-output/by-machine error:", err);
@@ -29,26 +48,30 @@ router.get("/aggregate", async (req, res) => {
   try {
     const { from, to } = req.query;
     const params = [];
-    let whereClause = "";
+    let where = "";
     if (from && to) {
-      whereClause = "WHERE e.record_date BETWEEN $1 AND $2";
+      where = "WHERE p.record_date BETWEEN $1 AND $2";
       params.push(from, to);
     }
     const { rows } = await pool.query(
-      `SELECT e.machine_id AS name, m.name AS "machineName",
-         CASE WHEN SUM(e.production) > 0
-              THEN ROUND(SUM(e.energy_kwh) / SUM(e.production), 2) ELSE 0 END AS energy_per_part,
-         CASE WHEN SUM(e.production) > 0
-              THEN ROUND(SUM(e.energy_kwh) / SUM(e.production) * sc.tariff_per_kwh, 2) ELSE 0 END AS cost_per_part,
-         ROUND(SUM(e.energy_kwh)::numeric, 1) AS "totalEnergy",
-         SUM(e.production) AS "totalParts",
-         ROUND(AVG(e.efficiency_score)) AS "avgEfficiency"
-       FROM energy_output_daily e
-       JOIN machines m ON m.id = e.machine_id
+      `SELECT
+         p.machine_id                            AS name,
+         m.name                                  AS "machineName",
+         CASE WHEN SUM(p.parts_produced) > 0
+              THEN ROUND(SUM(p.energy_kwh_used) / SUM(p.parts_produced), 2)
+              ELSE 0 END                          AS energy_per_part,
+         CASE WHEN SUM(p.parts_produced) > 0
+              THEN ROUND(SUM(p.energy_kwh_used) / SUM(p.parts_produced) * sc.tariff_per_kwh, 2)
+              ELSE 0 END                          AS cost_per_part,
+         ROUND(SUM(p.energy_kwh_used)::numeric, 1) AS "totalEnergy",
+         SUM(p.parts_produced)                   AS "totalParts",
+         ROUND(AVG(p.efficiency_score))           AS "avgEfficiency"
+       FROM machine_parts_produced p
+       JOIN machines m ON m.id = p.machine_id
        CROSS JOIN system_config sc
-       ${whereClause}
-       GROUP BY e.machine_id, m.name, sc.tariff_per_kwh
-       ORDER BY e.machine_id`,
+       ${where}
+       GROUP BY p.machine_id, m.name, sc.tariff_per_kwh
+       ORDER BY p.machine_id`,
       params
     );
     res.json(rows);
@@ -59,3 +82,4 @@ router.get("/aggregate", async (req, res) => {
 });
 
 module.exports = router;
+

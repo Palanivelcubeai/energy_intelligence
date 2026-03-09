@@ -33,7 +33,7 @@ export default function MachineMonitoring() {
     const fetchTrend = () =>
       apiClient.get(`/machines/${selected}/trend`).then(r => {
         const data = r.data.map((p: { time: string; value: number }) => ({
-          time: new Date(p.time).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+          time: new Date(p.time).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
           value: Number(p.value),
         }));
         setTrend(data);
@@ -47,7 +47,7 @@ export default function MachineMonitoring() {
   useEffect(() => {
     if (!selected) return;
     const fetchProd = () =>
-      apiClient.get('/metrics/production-trend').then(r => {
+      apiClient.get(`/metrics/production-trend?machine_id=${selected}`).then(r => {
         const data = r.data.map((p: { time: string; production: number; energy: number }) => ({
           time: p.time,
           parts: p.production,

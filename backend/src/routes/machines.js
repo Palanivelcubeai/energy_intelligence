@@ -44,14 +44,19 @@ router.get("/:id/metrics", async (req, res) => {
   }
 });
 
-// GET /api/machines/:id/trend — 24h trend for a machine
+// GET /api/machines/:id/trend — 24h trend for a machine (hourly IST buckets)
 router.get("/:id/trend", async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT recorded_at AS time, kw AS value
+      `SELECT
+         -- Convert to IST hour bucket, return as UTC-aware timestamp so frontend toLocaleTimeString works
+         (DATE_TRUNC('hour', recorded_at AT TIME ZONE 'Asia/Kolkata')
+            AT TIME ZONE 'Asia/Kolkata') AS time,
+         ROUND(AVG(kw)::numeric, 2) AS value
        FROM machine_metrics
        WHERE machine_id = $1 AND recorded_at >= NOW() - INTERVAL '24 hours'
-       ORDER BY recorded_at`,
+       GROUP BY DATE_TRUNC('hour', recorded_at AT TIME ZONE 'Asia/Kolkata')
+       ORDER BY DATE_TRUNC('hour', recorded_at AT TIME ZONE 'Asia/Kolkata')`,
       [req.params.id]
     );
     res.json(rows);

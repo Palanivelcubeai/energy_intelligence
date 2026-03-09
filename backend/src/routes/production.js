@@ -26,27 +26,37 @@ router.get("/by-machine", async (req, res) => {
 router.get("/by-shift", async (req, res) => {
   try {
     const { from, to } = req.query;
-    let query = `SELECT
-                   CASE WHEN EXTRACT(HOUR FROM recorded_at) BETWEEN 6 AND 13 THEN 'Morning'
-                        WHEN EXTRACT(HOUR FROM recorded_at) BETWEEN 14 AND 21 THEN 'Afternoon'
-                        ELSE 'Night' END AS shift,
-                   machine_id, SUM(parts_produced) AS parts_produced,
-                   SUM(rejection_count) AS parts_rejected,
-                   ROUND(AVG(efficiency_score)) AS efficiency_pct
-                 FROM machine_metrics`;
     const params = [];
+    let where = "";
     if (from && to) {
-      query += " WHERE recorded_at::date BETWEEN $1 AND $2";
+      where = " WHERE record_date BETWEEN $1 AND $2";
       params.push(from, to);
+    } else {
+      // Default: today only so the chart shows today's per-shift breakdown
+      where = " WHERE record_date = CURRENT_DATE";
     }
-    query += " GROUP BY shift, machine_id ORDER BY shift, machine_id";
-    const { rows } = await pool.query(query, params);
+
+    const { rows } = await pool.query(
+      `SELECT
+         CASE shift
+           WHEN 'Shift A (06-14)' THEN 'Morning'
+           WHEN 'Shift B (14-22)' THEN 'Afternoon'
+           ELSE 'Night' END  AS shift,
+         machine_id,
+         SUM(parts_produced)  AS parts_produced,
+         SUM(parts_rejected)  AS parts_rejected,
+         ROUND(AVG(efficiency_score)) AS efficiency_pct
+       FROM machine_parts_produced${where}
+       GROUP BY shift, machine_id
+       ORDER BY shift, machine_id`,
+      params
+    );
 
     // Reshape to frontend format: [ { shift, CNC-1: n, CNC-2: n, ... } ]
     const shiftMap = {};
     rows.forEach((r) => {
       if (!shiftMap[r.shift]) shiftMap[r.shift] = { shift: r.shift };
-      shiftMap[r.shift][r.machine_id] = r.parts_produced;
+      shiftMap[r.shift][r.machine_id] = Number(r.parts_produced);
     });
     res.json(Object.values(shiftMap));
   } catch (err) {
@@ -59,14 +69,14 @@ router.get("/by-shift", async (req, res) => {
 router.get("/monthly", async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT TO_CHAR(recorded_at, 'Mon') AS month,
-              SUM(parts_produced) AS production, SUM(kwh) AS energy
-       FROM machine_metrics
-       WHERE recorded_at >= DATE_TRUNC('year', NOW())
-       GROUP BY EXTRACT(MONTH FROM recorded_at), TO_CHAR(recorded_at, 'Mon')
-       ORDER BY EXTRACT(MONTH FROM recorded_at)`
+      `SELECT TO_CHAR(record_date, 'Mon') AS month,
+              SUM(parts_produced) AS production
+       FROM machine_parts_produced
+       WHERE record_date >= DATE_TRUNC('year', CURRENT_DATE)
+       GROUP BY EXTRACT(MONTH FROM record_date), TO_CHAR(record_date, 'Mon')
+       ORDER BY EXTRACT(MONTH FROM record_date)`
     );
-    res.json(rows);
+    res.json(rows.map(r => ({ month: r.month, production: parseInt(r.production) || 0 })));
   } catch (err) {
     console.error("GET /production/monthly error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -77,15 +87,24 @@ router.get("/monthly", async (_req, res) => {
 router.get("/weekly", async (req, res) => {
   try {
     const { from, to } = req.query;
-    let query = `SELECT recorded_at::date AS record_date, SUM(parts_produced) AS production, SUM(kwh) AS energy
-                 FROM machine_metrics`;
     const params = [];
+    let where = "";
     if (from && to) {
-      query += " WHERE recorded_at::date BETWEEN $1 AND $2";
+      where = " WHERE record_date BETWEEN $1 AND $2";
       params.push(from, to);
     }
-    query += " GROUP BY recorded_at::date ORDER BY recorded_at::date";
-    const { rows } = await pool.query(query, params);
+    // Use machine_parts_produced (incremental per-shift rows) to get correct daily totals.
+    // machine_metrics.parts_produced is cumulative — SUM() on it gives inflated values.
+    const { rows } = await pool.query(
+      `SELECT
+         record_date,
+         SUM(parts_produced)  AS production,
+         SUM(energy_kwh_used) AS energy
+       FROM machine_parts_produced${where}
+       GROUP BY record_date
+       ORDER BY record_date`,
+      params
+    );
     res.json(rows);
   } catch (err) {
     console.error("GET /production/weekly error:", err);

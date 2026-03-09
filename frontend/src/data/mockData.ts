@@ -14,6 +14,7 @@ export interface MachineData {
   product_type: string;
   rejection_count: number;
   efficiency_score: number;
+  production_target: number;
 }
 
 export interface TimeSeriesPoint {

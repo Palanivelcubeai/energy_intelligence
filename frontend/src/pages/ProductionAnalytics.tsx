@@ -13,30 +13,43 @@ const tt = { contentStyle: { backgroundColor: 'hsl(222, 25%, 11%)', border: '1px
 export default function ProductionAnalytics() {
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [shiftProduction, setShiftProduction] = useState<Record<string, unknown>[]>([]);
-  const [weeklyData, setWeeklyData] = useState<{ day: string; production: number; target: number }[]>([]);
+  const [weeklyData, setWeeklyData] = useState<{ record_date?: string; day?: string; production: number }[]>([]);
 
   useEffect(() => {
     apiClient.get("/metrics/realtime").then(r => setMachines(r.data)).catch(() => {});
     apiClient.get("/production/by-shift").then(r => setShiftProduction(r.data)).catch(() => {});
-    apiClient.get("/production/weekly").then(r => {
-      const data = r.data.map((row: { record_date: string; production: number }) => ({
-        day: new Date(row.record_date).toLocaleDateString('en-IN', { weekday: 'short' }),
-        production: Number(row.production),
-        target: 550,
-      }));
-      setWeeklyData(data.slice(-7));
-    }).catch(() => {});
+    apiClient.get("/production/weekly").then(r => setWeeklyData(r.data)).catch(() => {});
   }, []);
+
+  // Recompute weekly chart data whenever machines (targets) or raw weekly data changes
+  const dailyTarget = machines.length > 0
+    ? machines.reduce((s, m) => s + (m.production_target || 0), 0)
+    : 1159;
+
+  const weeklyChartData = (weeklyData as { record_date?: string; day?: string; production: number }[])
+    .map(row => {
+      const d = new Date(row.record_date ?? row.day!);
+      const weekday = d.toLocaleDateString('en-IN', { weekday: 'short' });
+      const dateStr = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+      return {
+        day: `${weekday} ${dateStr}`,
+        production: Number(row.production),
+        target: dailyTarget,
+      };
+    })
+    .slice(-7);
 
   const machineProduction = machines.map(m => ({
     name: m.id,
     produced: m.parts_produced,
     rejected: m.rejection_count,
-    target: Math.round(m.parts_produced * 1.1),
+    target: m.production_target || Math.round(m.parts_produced * 1.15),
   }));
 
   const totalParts = machines.reduce((s, m) => s + m.parts_produced, 0);
   const totalRejected = machines.reduce((s, m) => s + m.rejection_count, 0);
+  const totalTarget = machines.reduce((s, m) => s + (m.production_target || 0), 0);
+  const targetAchievement = totalTarget > 0 ? ((totalParts / totalTarget) * 100).toFixed(1) : "--";
 
   return (
     <div className="space-y-6">
@@ -48,8 +61,8 @@ export default function ProductionAnalytics() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <KPICard title="Total Parts Today" value={totalParts} icon={<Package className="h-4 w-4" />} variant="primary" />
         <KPICard title="Rejected Parts" value={totalRejected} variant="destructive" />
-        <KPICard title="Rejection Rate" value={((totalRejected / totalParts) * 100).toFixed(1)} unit="%" />
-        <KPICard title="Target Achievement" value="91" unit="%" icon={<Target className="h-4 w-4" />} variant="success" />
+        <KPICard title="Rejection Rate" value={totalParts > 0 ? ((totalRejected / totalParts) * 100).toFixed(1) : "0.0"} unit="%" />
+        <KPICard title="Target Achievement" value={targetAchievement} unit="%" icon={<Target className="h-4 w-4" />} variant="success" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -95,7 +108,7 @@ export default function ProductionAnalytics() {
           <h3 className="text-sm font-medium text-foreground mb-4">Weekly Production Trend</h3>
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={weeklyData}>
+              <ComposedChart data={weeklyChartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 20%, 18%)" />
                 <XAxis dataKey="day" stroke="hsl(215, 15%, 55%)" fontSize={10} />
                 <YAxis stroke="hsl(215, 15%, 55%)" fontSize={10} />
