@@ -22,7 +22,7 @@ router.get("/summary", async (_req, res) => {
     const { rows: todayParts } = await pool.query(
       `SELECT machine_id, SUM(parts_produced) AS parts, SUM(parts_rejected) AS rejected
        FROM machine_parts_produced
-       WHERE record_date = CURRENT_DATE
+       WHERE recorded_at::date = CURRENT_DATE
        GROUP BY machine_id`
     );
     const todayPartsMap = {};
@@ -72,7 +72,7 @@ router.get("/realtime", async (_req, res) => {
               SUM(parts_produced) AS parts,
               SUM(parts_rejected) AS rejected
        FROM machine_parts_produced
-       WHERE record_date = CURRENT_DATE
+       WHERE recorded_at::date = CURRENT_DATE
        GROUP BY machine_id`
     );
     const todayMap = {};
@@ -128,7 +128,7 @@ router.get("/kpis", async (_req, res) => {
     const { rows: monthlyRows } = await pool.query(
       `SELECT SUM(parts_produced) AS monthly_production
        FROM machine_parts_produced
-       WHERE record_date >= DATE_TRUNC('month', CURRENT_DATE)`
+       WHERE recorded_at::date >= DATE_TRUNC('month', CURRENT_DATE)`
     );
 
     // Plant efficiency — average of latest efficiency_score per machine

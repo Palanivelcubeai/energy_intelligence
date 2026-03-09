@@ -29,11 +29,11 @@ router.get("/by-shift", async (req, res) => {
     const params = [];
     let where = "";
     if (from && to) {
-      where = " WHERE record_date BETWEEN $1 AND $2";
+      where = " WHERE recorded_at::date BETWEEN $1::date AND $2::date";
       params.push(from, to);
     } else {
       // Default: today only so the chart shows today's per-shift breakdown
-      where = " WHERE record_date = CURRENT_DATE";
+      where = " WHERE recorded_at::date = CURRENT_DATE";
     }
 
     const { rows } = await pool.query(
@@ -69,12 +69,12 @@ router.get("/by-shift", async (req, res) => {
 router.get("/monthly", async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT TO_CHAR(record_date, 'Mon') AS month,
+      `SELECT TO_CHAR(recorded_at, 'Mon') AS month,
               SUM(parts_produced) AS production
        FROM machine_parts_produced
-       WHERE record_date >= DATE_TRUNC('year', CURRENT_DATE)
-       GROUP BY EXTRACT(MONTH FROM record_date), TO_CHAR(record_date, 'Mon')
-       ORDER BY EXTRACT(MONTH FROM record_date)`
+       WHERE recorded_at::date >= DATE_TRUNC('year', CURRENT_DATE)
+       GROUP BY EXTRACT(MONTH FROM recorded_at), TO_CHAR(recorded_at, 'Mon')
+       ORDER BY EXTRACT(MONTH FROM recorded_at)`
     );
     res.json(rows.map(r => ({ month: r.month, production: parseInt(r.production) || 0 })));
   } catch (err) {
@@ -90,19 +90,19 @@ router.get("/weekly", async (req, res) => {
     const params = [];
     let where = "";
     if (from && to) {
-      where = " WHERE record_date BETWEEN $1 AND $2";
+      where = " WHERE recorded_at::date BETWEEN $1::date AND $2::date";
       params.push(from, to);
     }
     // Use machine_parts_produced (incremental per-shift rows) to get correct daily totals.
     // machine_metrics.parts_produced is cumulative — SUM() on it gives inflated values.
     const { rows } = await pool.query(
       `SELECT
-         record_date,
+         recorded_at::date   AS record_date,
          SUM(parts_produced)  AS production,
          SUM(energy_kwh_used) AS energy
        FROM machine_parts_produced${where}
-       GROUP BY record_date
-       ORDER BY record_date`,
+       GROUP BY recorded_at::date
+       ORDER BY recorded_at::date`,
       params
     );
     res.json(rows);

@@ -45,6 +45,33 @@ PROFILES = {
 # Parts production target per 8-hour shift
 PRODUCTION_TARGETS = {mid: round(p["parts_per_hour"] * 8) for mid, p in PROFILES.items()}
 
+
+def get_hour_load_multiplier(hour: int, minute: int = 0):
+    """Return (low, high) load_factor range based on time-of-day plant activity.
+
+    Simulates a realistic factory load profile:
+      06-07  Warm-up / machine start          ~55-68%
+      07-10  Morning production peak          ~88-100%
+      10-10:30 Tea break (machines slowing)   ~42-58%
+      10:30-12  Pre-lunch push                ~88-100%
+      12-13  Lunch break (most machines idle) ~28-42%
+      13-17  Afternoon peak                   ~85-100%
+      17-18  Evening wind-down                ~68-80%
+      18-22  Night shift at reduced load      ~58-75%
+      22-06  Post-shift / minimal activity    ~20-40%
+    """
+    frac = hour + minute / 60.0
+    if frac < 6:     return (0.20, 0.40)   # pre-shift / night
+    if frac < 7:     return (0.55, 0.68)   # warm-up
+    if frac < 10:    return (0.88, 1.00)   # morning peak
+    if frac < 10.5:  return (0.42, 0.58)   # tea break
+    if frac < 12:    return (0.88, 1.00)   # pre-lunch push
+    if frac < 13:    return (0.28, 0.42)   # lunch break
+    if frac < 17:    return (0.85, 1.00)   # afternoon peak
+    if frac < 18:    return (0.68, 0.80)   # evening slowdown
+    if frac < 22:    return (0.58, 0.75)   # night shift
+    return (0.20, 0.40)                    # post-shift
+
 INSERT_SQL = """
     INSERT INTO machine_metrics (
         machine_id, recorded_at,
@@ -65,13 +92,13 @@ INSERT_SQL = """
 # ── Upsert: increment per-machine shift production row ────────────────
 UPSERT_MACHINE_PARTS_SQL = """
     INSERT INTO machine_parts_produced (
-        machine_id, record_date, shift,
+        machine_id, shift,
         parts_produced, parts_rejected, production_target,
         energy_kwh_used, energy_per_part,
         efficiency_score, runtime_hours, idle_hours,
         recorded_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s)
-    ON CONFLICT (machine_id, record_date, shift) DO UPDATE SET
+    ) VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s)
+    ON CONFLICT (machine_id, (recorded_at::date), shift) DO UPDATE SET
         parts_produced  = machine_parts_produced.parts_produced  + EXCLUDED.parts_produced,
         parts_rejected  = machine_parts_produced.parts_rejected  + EXCLUDED.parts_rejected,
         energy_kwh_used = ROUND((machine_parts_produced.energy_kwh_used + EXCLUDED.energy_kwh_used)::numeric, 4),
@@ -91,13 +118,13 @@ UPSERT_MACHINE_PARTS_SQL = """
 # ── Upsert: rebuild shift summary from machine rows ───────────────────
 UPSERT_SUMMARY_SQL = """
     INSERT INTO production_summary (
-        record_date, shift,
+        shift,
         total_parts_produced, total_parts_rejected,
         overall_efficiency_pct, total_energy_kwh, avg_energy_per_part,
         recorded_at
     )
     SELECT
-        record_date, shift,
+        shift,
         SUM(parts_produced),
         SUM(parts_rejected),
         ROUND(AVG(efficiency_score)::numeric, 2),
@@ -107,9 +134,9 @@ UPSERT_SUMMARY_SQL = """
              ELSE 0 END,
         DATE_TRUNC('second', MAX(recorded_at))
     FROM machine_parts_produced
-    WHERE record_date = %s AND shift = %s
-    GROUP BY record_date, shift
-    ON CONFLICT (record_date, shift) DO UPDATE SET
+    WHERE recorded_at::date = %s AND shift = %s
+    GROUP BY shift
+    ON CONFLICT ((recorded_at::date), shift) DO UPDATE SET
         total_parts_produced   = EXCLUDED.total_parts_produced,
         total_parts_rejected   = EXCLUDED.total_parts_rejected,
         overall_efficiency_pct = EXCLUDED.overall_efficiency_pct,
@@ -121,13 +148,13 @@ UPSERT_SUMMARY_SQL = """
 # ── Upsert: rebuild 'Daily' summary from shift rows ───────────────────
 UPSERT_DAILY_SUMMARY_SQL = """
     INSERT INTO production_summary (
-        record_date, shift,
+        shift,
         total_parts_produced, total_parts_rejected,
         overall_efficiency_pct, total_energy_kwh, avg_energy_per_part,
         recorded_at
     )
     SELECT
-        record_date, 'Daily',
+        'Daily',
         SUM(total_parts_produced),
         SUM(total_parts_rejected),
         ROUND(AVG(overall_efficiency_pct)::numeric, 2),
@@ -137,9 +164,8 @@ UPSERT_DAILY_SUMMARY_SQL = """
              ELSE 0 END,
         DATE_TRUNC('second', MAX(recorded_at))
     FROM production_summary
-    WHERE record_date = %s AND shift != 'Daily'
-    GROUP BY record_date
-    ON CONFLICT (record_date, shift) DO UPDATE SET
+    WHERE recorded_at::date = %s AND shift != 'Daily'
+    ON CONFLICT ((recorded_at::date), shift) DO UPDATE SET
         total_parts_produced   = EXCLUDED.total_parts_produced,
         total_parts_rejected   = EXCLUDED.total_parts_rejected,
         overall_efficiency_pct = EXCLUDED.overall_efficiency_pct,
@@ -284,11 +310,14 @@ def backfill_today(conn):
 
             tick_time = shift_start_local
             rows_to_insert = []
+            # Per-shift incremental accumulators for machine_parts_produced
+            shift_totals = {}  # shift_name -> {parts, rej, kwh, rt, idle, eff, last_ts}
 
             while tick_time <= local_now:
                 hour        = tick_time.hour
                 is_working  = 6 <= hour < 22
-                load_factor = random.uniform(0.85, 1.0) if is_working else random.uniform(0.20, 0.40)
+                lf_low, lf_high = get_hour_load_multiplier(hour, tick_time.minute)
+                load_factor = random.uniform(lf_low, lf_high)
 
                 kw     = max(0.5, round(p["kw_base"] * load_factor + random.uniform(-p["kw_var"], p["kw_var"]) * load_factor, 1))
                 pf_val = round(p["pf"] + random.uniform(-0.02, 0.02), 2)
@@ -310,8 +339,21 @@ def backfill_today(conn):
                 cumulative_idle   = round(cumulative_idle + 0.0, 4)
                 epp = round(cumulative_kwh / cumulative_parts, 2) if cumulative_parts > 0 else 0.0
 
+                # Determine which shift this tick belongs to
+                tick_shift, _ = get_current_shift(tick_time)
+                if tick_shift not in shift_totals:
+                    shift_totals[tick_shift] = {'parts': 0, 'rej': 0, 'kwh': 0.0,
+                                                'rt': 0.0, 'idle': 0.0, 'eff': eff, 'last_ts': None}
+                st = shift_totals[tick_shift]
+                st['parts'] += new_parts
+                st['rej']   += new_rej
+                st['kwh']    = round(st['kwh'] + kwh_inc, 4)
+                st['rt']     = round(st['rt'] + TICK_HOURS, 4)
+                st['eff']    = eff
                 # Convert local tick time → exact UTC timestamp
                 row_ts = (tick_time - utc_offset_td).replace(tzinfo=timezone.utc)
+                st['last_ts'] = row_ts
+
                 rows_to_insert.append((
                     machine_id, row_ts,
                     kw, cumulative_kwh, pf_val,
@@ -330,28 +372,19 @@ def backfill_today(conn):
             kwh   = cumulative_kwh
             rt    = cumulative_rt
 
-        # Also seed machine_parts_produced for the current shift so the
-        # shift-wise chart shows realistic numbers immediately
-        cur.execute(
-            "SELECT COALESCE(SUM(parts_produced), 0) FROM machine_parts_produced "
-            "WHERE machine_id = %s AND record_date = %s AND shift = %s",
-            (machine_id, shift_date, shift),
-        )
-        existing_shift_parts = int(cur.fetchone()[0])
-        if existing_shift_parts < parts:
-            # Insert/merge the gap so total reaches the expected value
-            gap_parts = max(0, parts - existing_shift_parts)
-            gap_rej   = sum(1 for _ in range(gap_parts) if random.random() < p["reject_rate"])
-            # Use last tick time (no microseconds) as recorded_at
-            last_tick_ts = (local_now - timedelta(seconds=local_now.second % INTERVAL_SEC,
-                                                  microseconds=local_now.microsecond)).replace(microsecond=0)
-            cur.execute(UPSERT_MACHINE_PARTS_SQL, (
-                machine_id, shift_date, shift,
-                gap_parts, gap_rej, PRODUCTION_TARGETS[machine_id],
-                round(kwh * (gap_parts / parts) if parts > 0 else kwh, 4),
-                eff, round(rt * (gap_parts / parts) if parts > 0 else rt, 4), 0.0,
-                last_tick_ts,
-            ))
+            # Upsert machine_parts_produced for EVERY shift that has ticks today
+            for s_name, st in shift_totals.items():
+                if st['parts'] == 0 and st['kwh'] == 0.0:
+                    continue
+                cur.execute(UPSERT_MACHINE_PARTS_SQL, (
+                    machine_id, s_name,
+                    st['parts'], st['rej'], PRODUCTION_TARGETS[machine_id],
+                    round(st['kwh'], 4),
+                    st['eff'], round(st['rt'], 4), 0.0,
+                    st['last_ts'],
+                ))
+            # Skip the single-shift upsert below for backfill path
+            continue
 
     conn.commit()
     cur.close()
@@ -373,7 +406,8 @@ def generate_and_insert(conn):
         local_now = datetime.now()
         hour = local_now.hour
         is_working = 6 <= hour < 22
-        load_factor = random.uniform(0.85, 1.0) if is_working else random.uniform(0.20, 0.40)
+        lf_low, lf_high = get_hour_load_multiplier(hour, local_now.minute)
+        load_factor = random.uniform(lf_low, lf_high)
         if local_now.weekday() == 6:
             load_factor *= 0.3
 
@@ -452,7 +486,7 @@ def generate_and_insert(conn):
 
         # ── Production tables ────────────────────────────────────────
         cur.execute(UPSERT_MACHINE_PARTS_SQL, (
-            machine_id, shift_date, shift,
+            machine_id, shift,
             new_parts, new_rej, PRODUCTION_TARGETS[machine_id],
             round(kwh_inc, 4), eff,
             round(runtime_inc, 4), round(idle_inc, 4),

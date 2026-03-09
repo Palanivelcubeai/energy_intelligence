@@ -16,12 +16,21 @@ const COLORS = [
 
 const chartTooltipStyle = {
   contentStyle: {
-    backgroundColor: 'hsl(222, 25%, 11%)',
-    border: '1px solid hsl(222, 20%, 18%)',
+    backgroundColor: '#ffffff',
+    border: '1px solid hsl(215, 20%, 80%)',
     borderRadius: '8px',
-    color: 'hsl(215, 20%, 85%)',
+    color: '#1a1a2e',
     fontSize: '12px',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
   },
+  itemStyle: {
+    color: '#1a1a2e',
+  },
+  labelStyle: {
+    color: '#1a1a2e',
+    fontWeight: 600,
+  },
+  cursor: { fill: 'rgba(100,160,255,0.08)' },
 };
 
 export default function Overview() {

@@ -8,12 +8,12 @@ router.get("/by-machine", async (req, res) => {
     const params = [];
     let where = "";
     if (from && to) {
-      where = "WHERE p.record_date BETWEEN $1 AND $2";
+      where = "WHERE p.recorded_at::date BETWEEN $1::date AND $2::date";
       params.push(from, to);
     }
     const { rows } = await pool.query(
       `SELECT
-         p.record_date                          AS date,
+         p.recorded_at::date                    AS date,
          p.machine_id                           AS machine,
          m.name                                 AS "machineName",
          ROUND(SUM(p.energy_kwh_used)::numeric, 2)  AS energy,
@@ -32,8 +32,8 @@ router.get("/by-machine", async (req, res) => {
        JOIN machines m ON m.id = p.machine_id
        CROSS JOIN system_config sc
        ${where}
-       GROUP BY p.record_date, p.machine_id, m.name, m.status, sc.tariff_per_kwh
-       ORDER BY p.record_date DESC, p.machine_id`,
+       GROUP BY p.recorded_at::date, p.machine_id, m.name, m.status, sc.tariff_per_kwh
+       ORDER BY p.recorded_at::date DESC, p.machine_id`,
       params
     );
     res.json(rows);
@@ -50,7 +50,7 @@ router.get("/aggregate", async (req, res) => {
     const params = [];
     let where = "";
     if (from && to) {
-      where = "WHERE p.record_date BETWEEN $1 AND $2";
+      where = "WHERE p.recorded_at::date BETWEEN $1::date AND $2::date";
       params.push(from, to);
     }
     const { rows } = await pool.query(

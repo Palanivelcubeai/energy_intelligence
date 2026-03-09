@@ -49,7 +49,6 @@ CREATE_PRODUCTION_SUMMARY = """
 CREATE TABLE IF NOT EXISTS production_summary (
     id                    BIGSERIAL    PRIMARY KEY,
 
-    record_date           DATE         NOT NULL,
     shift                 VARCHAR(30)  NOT NULL
                               CHECK (shift IN ('Shift A (06-14)', 'Shift B (14-22)', 'Shift C (22-06)', 'Daily')),
 
@@ -65,13 +64,11 @@ CREATE TABLE IF NOT EXISTS production_summary (
 
     notes       TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    recorded_at TIMESTAMP   NOT NULL DEFAULT NOW(),
-
-    UNIQUE (record_date, shift)
+    recorded_at TIMESTAMP   NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_production_summary_date
-    ON production_summary (record_date DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_production_summary_date_shift
+    ON production_summary ((recorded_at::date), shift);
 """
 
 # 2. Per-machine parts produced detail
@@ -80,7 +77,6 @@ CREATE TABLE IF NOT EXISTS machine_parts_produced (
     id               BIGSERIAL    PRIMARY KEY,
 
     machine_id       VARCHAR(20)  NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
-    record_date      DATE         NOT NULL,
     shift            VARCHAR(30)  NOT NULL
                          CHECK (shift IN ('Shift A (06-14)', 'Shift B (14-22)', 'Shift C (22-06)')),
 
@@ -102,15 +98,13 @@ CREATE TABLE IF NOT EXISTS machine_parts_produced (
 
     notes       TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    recorded_at TIMESTAMP   NOT NULL DEFAULT NOW(),
-
-    UNIQUE (machine_id, record_date, shift)
+    recorded_at TIMESTAMP   NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_mpp_machine_date
-    ON machine_parts_produced (machine_id, record_date DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mpp_machine_date_shift
+    ON machine_parts_produced (machine_id, (recorded_at::date), shift);
 CREATE INDEX IF NOT EXISTS idx_mpp_date_shift
-    ON machine_parts_produced (record_date DESC, shift);
+    ON machine_parts_produced ((recorded_at::date) DESC, shift);
 """
 
 # =====================================================================
@@ -148,20 +142,22 @@ def _seed_machine_parts(cur, day: date, shift: str, is_maintenance_day: bool):
         idle     = round(8.0 - runtime, 2)
         eff      = max(0, min(100, int((produced / p["parts_target"]) * 100) + random.randint(-3, 3)))
 
+        day_ts = datetime.combine(day, datetime.min.time())
         cur.execute(
             """
             INSERT INTO machine_parts_produced (
-                machine_id, record_date, shift,
+                machine_id, shift,
                 parts_produced, parts_rejected, production_target,
                 energy_kwh_used, energy_per_part,
-                efficiency_score, runtime_hours, idle_hours
+                efficiency_score, runtime_hours, idle_hours,
+                recorded_at
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (machine_id, record_date, shift) DO NOTHING
+            ON CONFLICT (machine_id, (recorded_at::date), shift) DO NOTHING
             """,
-            (mid, day, shift,
+            (mid, shift,
              produced, rejected, p["parts_target"],
              energy, epp,
-             eff, runtime, idle),
+             eff, runtime, idle, day_ts),
         )
         rows[mid] = dict(produced=produced, rejected=rejected, energy=energy, eff=eff)
 
@@ -176,23 +172,26 @@ def _seed_summary(cur, day: date, shift: str, machine_rows: dict):
     avg_eff        = round(sum(r["eff"] for r in machine_rows.values()) / len(machine_rows), 2)
     epp            = round(total_energy / total_produced, 3) if total_produced > 0 else 0.0
 
+    day_ts = datetime.combine(day, datetime.min.time())
     cur.execute(
         """
         INSERT INTO production_summary (
-            record_date, shift,
+            shift,
             total_parts_produced, total_parts_rejected,
-            overall_efficiency_pct, total_energy_kwh, avg_energy_per_part
+            overall_efficiency_pct, total_energy_kwh, avg_energy_per_part,
+            recorded_at
         ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (record_date, shift) DO NOTHING
+        ON CONFLICT ((recorded_at::date), shift) DO NOTHING
         """,
-        (day, shift,
+        (shift,
          total_produced, total_rejected,
-         avg_eff, total_energy, epp),
+         avg_eff, total_energy, epp, day_ts),
     )
 
 
 def _seed_daily_rollup(cur, day: date):
     """Build the 'Daily' summary row from the three shift rows."""
+    day_ts = datetime.combine(day, datetime.min.time())
     cur.execute(
         """
         SELECT
@@ -204,7 +203,7 @@ def _seed_daily_rollup(cur, day: date):
                  THEN ROUND((SUM(total_energy_kwh) / SUM(total_parts_produced))::numeric, 3)
                  ELSE 0 END
         FROM production_summary
-        WHERE record_date = %s AND shift != 'Daily'
+        WHERE recorded_at::date = %s AND shift != 'Daily'
         """,
         (day,),
     )
@@ -213,13 +212,14 @@ def _seed_daily_rollup(cur, day: date):
         cur.execute(
             """
             INSERT INTO production_summary (
-                record_date, shift,
+                shift,
                 total_parts_produced, total_parts_rejected,
-                overall_efficiency_pct, total_energy_kwh, avg_energy_per_part
-            ) VALUES (%s, 'Daily', %s, %s, %s, %s, %s)
-            ON CONFLICT (record_date, shift) DO NOTHING
+                overall_efficiency_pct, total_energy_kwh, avg_energy_per_part,
+                recorded_at
+            ) VALUES ('Daily', %s, %s, %s, %s, %s, %s)
+            ON CONFLICT ((recorded_at::date), shift) DO NOTHING
             """,
-            (day, int(row[0]), int(row[1]), row[2], row[3], row[4]),
+            (int(row[0]), int(row[1]), row[2], row[3], row[4], day_ts),
         )
 
 
