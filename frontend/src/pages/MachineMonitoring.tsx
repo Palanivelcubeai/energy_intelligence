@@ -18,16 +18,16 @@ export default function MachineMonitoring() {
   const [trend, setTrend] = useState<{ time: string; value: number }[]>([]);
   const [prodData, setProdData] = useState<{ time: string; parts: number; energy_per_part: string }[]>([]);
 
-  // Auto-poll machines every 3 seconds for live updates
+  // Auto-poll machines every 10 seconds for live updates
   useEffect(() => {
     const fetchMachines = () =>
       apiClient.get("/metrics/realtime").then(r => setMachines(r.data)).catch(() => {});
     fetchMachines();
-    const interval = setInterval(fetchMachines, 3000);
+    const interval = setInterval(fetchMachines, 10000);
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-poll trend data every 3 seconds when a machine is selected
+  // Auto-poll trend data every 30 seconds when a machine is selected (hourly buckets)
   useEffect(() => {
     if (!selected) return;
     const fetchTrend = () =>
@@ -39,7 +39,7 @@ export default function MachineMonitoring() {
         setTrend(data);
       }).catch(() => {});
     fetchTrend();
-    const interval = setInterval(fetchTrend, 3000);
+    const interval = setInterval(fetchTrend, 30000);
     return () => clearInterval(interval);
   }, [selected]);
 

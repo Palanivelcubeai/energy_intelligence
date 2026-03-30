@@ -22,6 +22,14 @@ export default function CostAnalysis() {
   const totalDailyCost = costData.machines.reduce((s, m) => s + m.energyCost, 0);
   const totalIdleCost = costData.machines.reduce((s, m) => s + m.idleCost, 0);
 
+  // Compute idle waste banner dynamically from real API data
+  const monthlyIdleWaste = Math.round(totalIdleCost * 26);
+  const sortedByIdle = [...costData.machines].sort((a, b) => b.idleCost - a.idleCost);
+  const top2 = sortedByIdle.slice(0, 2);
+  const top2IdleSum = top2.reduce((s, m) => s + m.idleCost, 0);
+  const top2Pct = totalIdleCost > 0 ? Math.round((top2IdleSum / totalIdleCost) * 100) : 0;
+  const top2Names = top2.map(m => m.id).join(' and ');
+
   const costPerMachine = costData.machines.map(c => ({
     name: c.id,
     energyCost: c.energyCost,
@@ -43,14 +51,16 @@ export default function CostAnalysis() {
         <KPICard title="Idle Waste Cost" value={`₹${totalIdleCost}`} icon={<TrendingDown className="h-4 w-4" />} variant="destructive" />
       </div>
 
-      {/* Wasted Energy Banner */}
+      {/* Wasted Energy Banner — computed from real API data */}
       <div className="insight-card border-l-warning bg-warning/5">
         <div className="flex items-center gap-3">
           <AlertTriangle className="h-5 w-5 text-warning shrink-0" />
           <div>
             <p className="text-sm font-medium text-foreground">Wasted Energy Cost Due to Idle Running</p>
-            <p className="text-2xl font-bold font-mono text-warning mt-1">₹18,500/month</p>
-            <p className="text-xs text-muted-foreground mt-1">CNC-3 and CNC-2 account for 72% of idle energy waste</p>
+            <p className="text-2xl font-bold font-mono text-warning mt-1">₹{monthlyIdleWaste.toLocaleString()}/month</p>
+            {top2Names && top2Pct > 0 && (
+              <p className="text-xs text-muted-foreground mt-1">{top2Names} account for {top2Pct}% of idle energy waste</p>
+            )}
           </div>
         </div>
       </div>

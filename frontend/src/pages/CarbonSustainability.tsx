@@ -42,7 +42,14 @@ export default function CarbonSustainability() {
   useEffect(() => {
     apiClient.get("/carbon/metrics").then(r => setMetrics(r.data)).catch(() => {});
     apiClient.get("/carbon/trend").then(r => setCo2Trend(r.data)).catch(() => {});
-    apiClient.get("/carbon/by-machine").then(r => setCo2ByMachine(r.data)).catch(() => {});
+    apiClient.get("/carbon/by-machine").then(r => {
+      const mapped = (r.data || []).map((m: { name: string; co2: number | string; kwh: number | string }) => ({
+        name: m.name,
+        co2: Number(m.co2) || 0,
+        kwh: Number(m.kwh) || 0,
+      }));
+      setCo2ByMachine(mapped);
+    }).catch(() => {});
     apiClient.get("/carbon/insights").then(r => setCarbonInsights(r.data)).catch(() => {});
   }, []);
 

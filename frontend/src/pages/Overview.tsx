@@ -37,19 +37,29 @@ export default function Overview() {
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [loadCurve, setLoadCurve] = useState<{ time: string; value: number }[]>([]);
   const [prodTrend, setProdTrend] = useState<{ time: string; production: number; energy: number }[]>([]);
+  const [carbonIntervals, setCarbonIntervals] = useState<any[]>([]);
   const [monthlyProduction, setMonthlyProduction] = useState<{ month: string; production: number }[]>([]);
   const [topInsights, setTopInsights] = useState<InsightData[]>([]);
   const [kpis, setKpis] = useState({ maxDemand: 0, monthlyProduction: 0, avgEfficiency: 0 });
 
-  // Auto-poll live data every 3 seconds
+  // Poll realtime machine state every 10 seconds
   useEffect(() => {
-    const fetchLive = () => {
+    const fetchRealtime = () =>
       apiClient.get("/metrics/realtime").then(r => setMachines(r.data)).catch(() => {});
+    fetchRealtime();
+    const interval = setInterval(fetchRealtime, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Poll load-curve and production-trend every 30 seconds (hourly buckets — no need for faster)
+  useEffect(() => {
+    const fetchCharts = () => {
       apiClient.get("/metrics/load-curve").then(r => setLoadCurve(r.data)).catch(() => {});
       apiClient.get("/metrics/production-trend").then(r => setProdTrend(r.data)).catch(() => {});
+      apiClient.get("/carbon/by-machine-interval").then(r => setCarbonIntervals(r.data)).catch(() => {});
     };
-    fetchLive();
-    const interval = setInterval(fetchLive, 3000);
+    fetchCharts();
+    const interval = setInterval(fetchCharts, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -121,6 +131,34 @@ export default function Overview() {
               </PieChart>
             </ResponsiveContainer>
           </div>
+        </div>
+      </div>
+
+      {/* Carbon 15 min Interval Chart */}
+      <div className="chart-container">
+        <h3 className="text-sm font-medium text-foreground mb-4">Carbon Emission (CO₂) by Machine - 15min Intervals</h3>
+        <div className="h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={carbonIntervals}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(222, 20%, 18%)" />
+              <XAxis dataKey="time" stroke="hsl(215, 15%, 55%)" fontSize={10} />
+              <YAxis stroke="hsl(215, 15%, 55%)" fontSize={10} unit=" kg" />
+              <Tooltip {...chartTooltipStyle} />
+              <Legend />
+              {['CNC-1', 'CNC-2', 'CNC-3', 'CNC-4', 'CNC-5'].map((machine, idx) => (
+                <Area 
+                  key={machine}
+                  type="monotone" 
+                  dataKey={`${machine}_co2`} 
+                  name={machine}
+                  stackId="1"
+                  stroke={COLORS[idx % COLORS.length]} 
+                  fill={COLORS[idx % COLORS.length]}
+                  fillOpacity={0.6}
+                />
+              ))}
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
       </div>
 

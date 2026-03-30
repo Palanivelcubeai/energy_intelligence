@@ -1,6 +1,15 @@
 const router = require("express").Router();
 const pool = require("../db");
 
+const TARIFF_CTE = `
+  CROSS JOIN (
+    SELECT COALESCE(
+      (SELECT tariff_per_kwh FROM system_config ORDER BY created_at DESC LIMIT 1),
+      8.5
+    ) AS tariff_per_kwh
+  ) sc
+`;
+
 // GET /api/energy-output/by-machine?from=DATE&to=DATE
 router.get("/by-machine", async (req, res) => {
   try {
@@ -29,8 +38,8 @@ router.get("/by-machine", async (req, res) => {
          ROUND(AVG(p.efficiency_score))          AS efficiency_score,
          m.status
        FROM machine_parts_produced p
-       JOIN machines m ON m.id = p.machine_id
-       CROSS JOIN system_config sc
+      JOIN machines m ON m.id = p.machine_id
+      ${TARIFF_CTE}
        ${where}
        GROUP BY p.recorded_at::date, p.machine_id, m.name, m.status, sc.tariff_per_kwh
        ORDER BY p.recorded_at::date DESC, p.machine_id`,
@@ -67,8 +76,8 @@ router.get("/aggregate", async (req, res) => {
          SUM(p.parts_produced)                   AS "totalParts",
          ROUND(AVG(p.efficiency_score))           AS "avgEfficiency"
        FROM machine_parts_produced p
-       JOIN machines m ON m.id = p.machine_id
-       CROSS JOIN system_config sc
+      JOIN machines m ON m.id = p.machine_id
+      ${TARIFF_CTE}
        ${where}
        GROUP BY p.machine_id, m.name, sc.tariff_per_kwh
        ORDER BY p.machine_id`,

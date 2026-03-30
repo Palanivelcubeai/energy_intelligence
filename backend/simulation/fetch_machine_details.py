@@ -46,6 +46,81 @@ PROFILES = {
 PRODUCTION_TARGETS = {mid: round(p["parts_per_hour"] * 8) for mid, p in PROFILES.items()}
 
 
+def ensure_machine_master_rows(conn) -> int:
+    """Ensure all machine IDs used by the simulator exist in machines table.
+
+    Supports both table variants seen in this repo:
+    - machines(id, name, status, rated_power_kw, production_target, product_type, ...)
+    - machines(id, name, model, status, product_type, ...)
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'machines'
+            """
+        )
+        machine_cols = {r[0] for r in cur.fetchall()}
+
+        required = {"id", "name", "status"}
+        if not required.issubset(machine_cols):
+            raise RuntimeError("machines table is missing required columns (id, name, status)")
+
+        insert_cols = ["id", "name", "status"]
+        if "model" in machine_cols:
+            insert_cols.append("model")
+        if "rated_power_kw" in machine_cols:
+            insert_cols.append("rated_power_kw")
+        if "production_target" in machine_cols:
+            insert_cols.append("production_target")
+        if "product_type" in machine_cols:
+            insert_cols.append("product_type")
+
+        placeholders = ", ".join(["%s"] * len(insert_cols))
+        insert_sql = f"""
+            INSERT INTO machines ({", ".join(insert_cols)})
+            VALUES ({placeholders})
+            ON CONFLICT (id) DO NOTHING
+        """
+
+        model_by_id = {
+            "CNC-1": "Haas VF-2",
+            "CNC-2": "DMG Mori",
+            "CNC-3": "Mazak",
+            "CNC-4": "Fanuc",
+            "CNC-5": "Okuma",
+        }
+        product_by_id = {
+            "CNC-1": "Shaft",
+            "CNC-2": "Gear",
+            "CNC-3": "Housing",
+            "CNC-4": "Bracket",
+            "CNC-5": "Pin",
+        }
+
+        rows = []
+        for machine_id, profile in PROFILES.items():
+            row = {
+                "id": machine_id,
+                "name": machine_id,
+                "status": "running",
+                "model": model_by_id.get(machine_id, "CNC"),
+                "rated_power_kw": round(profile["kw_base"], 2),
+                "production_target": PRODUCTION_TARGETS[machine_id],
+                "product_type": product_by_id.get(machine_id, ""),
+            }
+            rows.append(tuple(row[c] for c in insert_cols))
+
+        cur.executemany(insert_sql, rows)
+        inserted = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        conn.commit()
+        return inserted
+    finally:
+        cur.close()
+
+
 def get_hour_load_multiplier(hour: int, minute: int = 0):
     """Return (low, high) load_factor range based on time-of-day plant activity.
 
@@ -549,10 +624,13 @@ def main() -> None:
     cycle = 0
     try:
         conn = psycopg2.connect(**DB_CONFIG)
+        inserted = ensure_machine_master_rows(conn)
         print("=" * 70)
         print("  LIVE MACHINE DETAILS  --  Generate + Fetch every 45 seconds")
         print("  Press Ctrl+C to stop")
         print("=" * 70)
+        if inserted:
+            print(f"  Seeded {inserted} missing machine master row(s).")
 
         # Pre-seed today's cumulative totals so KPI cards show realistic values
         backfill_today(conn)

@@ -25,30 +25,84 @@ router.get("/by-machine", async (req, res) => {
 // GET /api/production/by-shift?from=DATE&to=DATE
 router.get("/by-shift", async (req, res) => {
   try {
-    const { from, to } = req.query;
+    const { from, to, scope } = req.query;
     const params = [];
     let where = "";
+    const scopeValue = typeof scope === "string" ? scope.toLowerCase() : "elapsed";
     if (from && to) {
-      where = " WHERE recorded_at::date BETWEEN $1::date AND $2::date";
+      where = " WHERE logical_date BETWEEN $1::date AND $2::date";
       params.push(from, to);
     } else {
-      // Default: today only so the chart shows today's per-shift breakdown
-      where = " WHERE recorded_at::date = CURRENT_DATE";
+      // Default: completed + current shift only (local plant time).
+      if (scopeValue === "day") {
+        where = " WHERE logical_date = current_local_date";
+      } else if (scopeValue === "current") {
+        where = " WHERE shift = current_shift AND logical_date = current_shift_logical_date";
+      } else {
+        where = " WHERE logical_date = current_shift_logical_date AND shift_order <= current_shift_order";
+      }
     }
 
     const { rows } = await pool.query(
-      `SELECT
-         CASE shift
-           WHEN 'Shift A (06-14)' THEN 'Morning'
-           WHEN 'Shift B (14-22)' THEN 'Afternoon'
-           ELSE 'Night' END  AS shift,
+      `WITH current_ctx AS (
+         SELECT
+           (NOW() AT TIME ZONE 'Asia/Kolkata')::date AS current_local_date,
+           CASE
+             WHEN EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) >= 6
+              AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) < 14 THEN 'Morning'
+             WHEN EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) >= 14
+              AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) < 22 THEN 'Afternoon'
+             ELSE 'Night'
+           END AS current_shift,
+           CASE
+             WHEN EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) >= 6
+              AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) < 14 THEN 1
+             WHEN EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) >= 14
+              AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) < 22 THEN 2
+             ELSE 3
+           END AS current_shift_order,
+           CASE
+             WHEN EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) < 6
+             THEN ((NOW() AT TIME ZONE 'Asia/Kolkata')::date - INTERVAL '1 day')::date
+             ELSE (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+           END AS current_shift_logical_date
+       ),
+       normalized AS (
+         SELECT
+           (recorded_at AT TIME ZONE 'Asia/Kolkata') AS local_ts,
+           CASE
+             WHEN shift = 'Shift C (22-06)' AND EXTRACT(HOUR FROM (recorded_at AT TIME ZONE 'Asia/Kolkata')) < 6
+             THEN ((recorded_at AT TIME ZONE 'Asia/Kolkata')::date - INTERVAL '1 day')::date
+             ELSE (recorded_at AT TIME ZONE 'Asia/Kolkata')::date
+           END AS logical_date,
+           CASE shift
+             WHEN 'Shift A (06-14)' THEN 'Morning'
+             WHEN 'Shift B (14-22)' THEN 'Afternoon'
+             ELSE 'Night'
+           END AS shift,
+           CASE shift
+             WHEN 'Shift A (06-14)' THEN 1
+             WHEN 'Shift B (14-22)' THEN 2
+             ELSE 3
+           END AS shift_order,
+           machine_id,
+           parts_produced,
+           parts_rejected,
+           efficiency_score
+         FROM machine_parts_produced
+       )
+       SELECT
+         shift,
          machine_id,
-         SUM(parts_produced)  AS parts_produced,
-         SUM(parts_rejected)  AS parts_rejected,
-         ROUND(AVG(efficiency_score)) AS efficiency_pct
-       FROM machine_parts_produced${where}
+         SUM(parts_produced) AS parts_produced,
+         SUM(parts_rejected) AS parts_rejected,
+         ROUND(AVG(efficiency_score)) AS efficiency_pct,
+         MIN(shift_order) AS shift_order
+       FROM normalized
+       CROSS JOIN current_ctx
+       ${where}
        GROUP BY shift, machine_id
-       ORDER BY shift, machine_id`,
+       ORDER BY MIN(shift_order), machine_id`,
       params
     );
 
@@ -90,19 +144,30 @@ router.get("/weekly", async (req, res) => {
     const params = [];
     let where = "";
     if (from && to) {
-      where = " WHERE recorded_at::date BETWEEN $1::date AND $2::date";
+      where = " WHERE logical_date BETWEEN $1::date AND $2::date";
       params.push(from, to);
     }
     // Use machine_parts_produced (incremental per-shift rows) to get correct daily totals.
     // machine_metrics.parts_produced is cumulative — SUM() on it gives inflated values.
     const { rows } = await pool.query(
-      `SELECT
-         recorded_at::date   AS record_date,
-         SUM(parts_produced)  AS production,
+      `WITH normalized AS (
+         SELECT
+           CASE
+             WHEN shift = 'Shift C (22-06)' AND EXTRACT(HOUR FROM recorded_at) < 6
+             THEN (recorded_at::date - INTERVAL '1 day')::date
+             ELSE recorded_at::date
+           END AS logical_date,
+           parts_produced,
+           energy_kwh_used
+         FROM machine_parts_produced
+       )
+       SELECT
+         logical_date AS record_date,
+         SUM(parts_produced) AS production,
          SUM(energy_kwh_used) AS energy
-       FROM machine_parts_produced${where}
-       GROUP BY recorded_at::date
-       ORDER BY recorded_at::date`,
+       FROM normalized${where}
+       GROUP BY logical_date
+       ORDER BY logical_date`,
       params
     );
     res.json(rows);

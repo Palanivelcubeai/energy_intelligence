@@ -52,7 +52,12 @@ router.get("/by-machine", async (_req, res) => {
                    ELSE 0 END                                        AS cost_per_part,
               ROUND(SUM(mp.idle_hours)::numeric, 2)                  AS idle_hours
        FROM machine_parts_produced mp
-       CROSS JOIN system_config sc
+       CROSS JOIN (
+         SELECT COALESCE(
+           (SELECT tariff_per_kwh FROM system_config ORDER BY created_at DESC LIMIT 1),
+           8.5
+         ) AS tariff_per_kwh
+       ) sc
        WHERE mp.recorded_at::date = CURRENT_DATE
        GROUP BY mp.machine_id, sc.tariff_per_kwh
        ORDER BY mp.machine_id`

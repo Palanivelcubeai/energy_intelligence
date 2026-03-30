@@ -1,6 +1,45 @@
 const router = require("express").Router();
 const pool = require("../db");
 
+const DEFAULT_REPORTS = [
+  {
+    key: "daily_cnc_energy",
+    name: "Daily CNC Energy Report",
+    description: "Daily machine-level energy, runtime, idle and status summary",
+    lastGenerated: null,
+  },
+  {
+    key: "production",
+    name: "Production Report",
+    description: "Shift-wise production, rejection and efficiency details",
+    lastGenerated: null,
+  },
+  {
+    key: "energy_per_part",
+    name: "Energy per Part Report",
+    description: "Machine ranking by energy and cost per part",
+    lastGenerated: null,
+  },
+  {
+    key: "monthly_efficiency",
+    name: "Monthly Efficiency Report",
+    description: "Month-wise production energy efficiency and carbon intensity",
+    lastGenerated: null,
+  },
+  {
+    key: "peak_demand",
+    name: "Peak Demand Report",
+    description: "Peak demand usage, contract utilization and risk levels",
+    lastGenerated: null,
+  },
+  {
+    key: "cost_optimization",
+    name: "Cost Optimization Report",
+    description: "Machine-wise energy cost, idle cost and potential savings",
+    lastGenerated: null,
+  },
+];
+
 // GET /api/reports/list
 router.get("/list", async (_req, res) => {
   try {
@@ -9,8 +48,15 @@ router.get("/list", async (_req, res) => {
               last_generated AS "lastGenerated"
        FROM reports ORDER BY created_at`
     );
+    if (!rows || rows.length === 0) {
+      return res.json(DEFAULT_REPORTS);
+    }
     res.json(rows);
   } catch (err) {
+    // If reports table does not exist in the current DB setup, serve default metadata.
+    if (err && (err.code === "42P01" || err.code === "42703")) {
+      return res.json(DEFAULT_REPORTS);
+    }
     console.error("GET /reports/list error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
@@ -21,11 +67,17 @@ router.get("/:key/data", async (req, res) => {
   try {
     const key = req.params.key;
 
-    // Update last_generated
-    await pool.query(
-      "UPDATE reports SET last_generated = NOW(), updated_at = NOW() WHERE report_key = $1",
-      [key]
-    );
+    // Update last_generated where reports metadata table exists.
+    try {
+      await pool.query(
+        "UPDATE reports SET last_generated = NOW(), updated_at = NOW() WHERE report_key = $1",
+        [key]
+      );
+    } catch (e) {
+      if (!(e && e.code === "42P01")) {
+        throw e;
+      }
+    }
 
     let data;
     switch (key) {
@@ -52,6 +104,11 @@ router.get("/:key/data", async (req, res) => {
     }
     res.json(data);
   } catch (err) {
+    // In this project, report source tables vary across setup scripts.
+    // Return empty report data instead of 500 when optional tables/columns are missing.
+    if (err && (err.code === "42P01" || err.code === "42703")) {
+      return res.json([]);
+    }
     console.error(`GET /reports/${req.params.key}/data error:`, err);
     res.status(500).json({ error: "Internal server error" });
   }

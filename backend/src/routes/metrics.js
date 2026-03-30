@@ -4,7 +4,8 @@ const pool = require("../db");
 // GET /api/metrics/summary — overview KPIs
 router.get("/summary", async (_req, res) => {
   try {
-    // Get latest metrics per machine
+    // Get latest metrics per machine — restrict to last 24 h so planner can use the
+    // (machine_id, recorded_at DESC) index efficiently instead of scanning the whole table
     const { rows: machines } = await pool.query(
       `SELECT DISTINCT ON (m.id)
          m.id, m.name, m.status, m.product_type,
@@ -15,6 +16,7 @@ router.get("/summary", async (_req, res) => {
          mm.parts_produced, mm.energy_per_part, mm.rejection_count, mm.efficiency_score
        FROM machines m
        LEFT JOIN machine_metrics mm ON mm.machine_id = m.id
+         AND mm.recorded_at >= NOW() - INTERVAL '24 hours'
        ORDER BY m.id, mm.recorded_at DESC`
     );
 
@@ -53,6 +55,7 @@ router.get("/summary", async (_req, res) => {
 // GET /api/metrics/realtime — all machines current state
 router.get("/realtime", async (_req, res) => {
   try {
+    // Restrict to last 24 h so the (machine_id, recorded_at DESC) index is used efficiently
     const { rows } = await pool.query(
       `SELECT DISTINCT ON (m.id)
          m.id, m.name, m.status, m.product_type, m.production_target,
@@ -63,6 +66,7 @@ router.get("/realtime", async (_req, res) => {
          mm.parts_produced, mm.energy_per_part, mm.rejection_count, mm.efficiency_score
        FROM machines m
        LEFT JOIN machine_metrics mm ON mm.machine_id = m.id
+         AND mm.recorded_at >= NOW() - INTERVAL '24 hours'
        ORDER BY m.id, mm.recorded_at DESC`
     );
 
@@ -70,14 +74,21 @@ router.get("/realtime", async (_req, res) => {
     const { rows: todayRows } = await pool.query(
       `SELECT machine_id,
               SUM(parts_produced) AS parts,
-              SUM(parts_rejected) AS rejected
+              SUM(parts_rejected) AS rejected,
+              ROUND(SUM(runtime_hours)::numeric, 2) AS runtime_hours,
+              ROUND(SUM(idle_hours)::numeric, 2) AS idle_hours
        FROM machine_parts_produced
        WHERE recorded_at::date = CURRENT_DATE
        GROUP BY machine_id`
     );
     const todayMap = {};
     todayRows.forEach(r => {
-      todayMap[r.machine_id] = { parts: parseInt(r.parts) || 0, rejected: parseInt(r.rejected) || 0 };
+      todayMap[r.machine_id] = {
+        parts: parseInt(r.parts) || 0,
+        rejected: parseInt(r.rejected) || 0,
+        runtime_hours: parseFloat(r.runtime_hours) || 0,
+        idle_hours: parseFloat(r.idle_hours) || 0,
+      };
     });
 
     // Shape into frontend's MachineData format
@@ -92,8 +103,8 @@ router.get("/realtime", async (_req, res) => {
         pf: parseFloat(r.pf) || 0,
         voltage: { r: parseFloat(r.voltage_r) || 0, y: parseFloat(r.voltage_y) || 0, b: parseFloat(r.voltage_b) || 0 },
         current: { r: parseFloat(r.current_r) || 0, y: parseFloat(r.current_y) || 0, b: parseFloat(r.current_b) || 0 },
-        runtime_hours: parseFloat(r.runtime_hours) || 0,
-        idle_hours: parseFloat(r.idle_hours) || 0,
+        runtime_hours: today.runtime_hours ?? (parseFloat(r.runtime_hours) || 0),
+        idle_hours: today.idle_hours ?? (parseFloat(r.idle_hours) || 0),
         // Use today's sum from machine_parts_produced; fall back to machine_metrics if no row yet
         parts_produced: today.parts ?? (r.parts_produced || 0),
         energy_per_part: parseFloat(r.energy_per_part) || 0,
@@ -113,33 +124,38 @@ router.get("/realtime", async (_req, res) => {
 // GET /api/metrics/kpis — max demand, monthly production, plant efficiency
 router.get("/kpis", async (_req, res) => {
   try {
-    // Max Demand (kVA) = max of sum of kW/PF across all machines at the same recorded_at
-    const { rows: demandRows } = await pool.query(
-      `SELECT ROUND(MAX(total_kva)::numeric, 1) AS max_demand
-       FROM (
-         SELECT recorded_at, SUM(kw / NULLIF(power_factor, 0)) AS total_kva
-         FROM machine_metrics
-         WHERE recorded_at >= date_trunc('day', NOW())
-         GROUP BY recorded_at
-       ) t`
-    );
-
-    // Monthly production — sum incremental parts from machine_parts_produced
-    const { rows: monthlyRows } = await pool.query(
-      `SELECT SUM(parts_produced) AS monthly_production
-       FROM machine_parts_produced
-       WHERE recorded_at::date >= DATE_TRUNC('month', CURRENT_DATE)`
-    );
-
-    // Plant efficiency — average of latest efficiency_score per machine
-    const { rows: effRows } = await pool.query(
-      `SELECT ROUND(AVG(efficiency_score)) AS avg_efficiency
-       FROM (
-         SELECT DISTINCT ON (machine_id) efficiency_score
-         FROM machine_metrics
-         ORDER BY machine_id, recorded_at DESC
-       ) t`
-    );
+    // Run all three independent queries in parallel to avoid serial round-trips
+    const [demandResult, monthlyResult, effResult] = await Promise.all([
+      // Max Demand (kVA) = max of sum of kW/PF across all machines at the same recorded_at
+      pool.query(
+        `SELECT ROUND(MAX(total_kva)::numeric, 1) AS max_demand
+         FROM (
+           SELECT recorded_at, SUM(kw / NULLIF(power_factor, 0)) AS total_kva
+           FROM machine_metrics
+           WHERE recorded_at >= date_trunc('day', NOW())
+           GROUP BY recorded_at
+         ) t`
+      ),
+      // Monthly production — sum incremental parts from machine_parts_produced
+      pool.query(
+        `SELECT SUM(parts_produced) AS monthly_production
+         FROM machine_parts_produced
+         WHERE recorded_at::date >= DATE_TRUNC('month', CURRENT_DATE)`
+      ),
+      // Plant efficiency — average of latest efficiency_score per machine
+      pool.query(
+        `SELECT ROUND(AVG(efficiency_score)) AS avg_efficiency
+         FROM (
+           SELECT DISTINCT ON (machine_id) efficiency_score
+           FROM machine_metrics
+           WHERE recorded_at >= NOW() - INTERVAL '24 hours'
+           ORDER BY machine_id, recorded_at DESC
+         ) t`
+      ),
+    ]);
+    const demandRows  = demandResult.rows;
+    const monthlyRows = monthlyResult.rows;
+    const effRows     = effResult.rows;
 
     res.json({
       maxDemand: parseFloat(demandRows[0]?.max_demand) || 0,

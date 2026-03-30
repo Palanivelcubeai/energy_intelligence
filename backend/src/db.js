@@ -7,6 +7,9 @@ const pool = new Pool({
   database: process.env.DB_NAME || "energy_db",
   user: process.env.DB_USER || "postgres",
   password: process.env.DB_PASSWORD || "12345",
+  max: 20,                  // allow up to 20 concurrent DB connections
+  idleTimeoutMillis: 30000, // release idle connections after 30 s
+  connectionTimeoutMillis: 3000, // fail fast if no connection available within 3 s
 });
 
 pool.on("error", (err) => {

@@ -1,9 +1,16 @@
 const router = require("express").Router();
 const pool = require("../db");
 
-// Shared CTE: computes plant-level kVA demand per tick
+// Shared CTE: computes plant-level kVA demand per tick.
+// Uses COALESCE so the query works even when system_config has no rows.
 const DEMAND_CTE = `
-  WITH demand_ticks AS (
+  WITH sc_cfg AS (
+    SELECT COALESCE(
+      (SELECT contract_demand_kva FROM system_config ORDER BY created_at DESC LIMIT 1),
+      85
+    ) AS contract_demand_kva
+  ),
+  demand_ticks AS (
     SELECT
       mm.recorded_at,
       ROUND(SUM(mm.kw / NULLIF(mm.power_factor, 0))::numeric, 1)          AS demand_kva,
@@ -17,7 +24,7 @@ const DEMAND_CTE = `
         ELSE 'Normal'
       END                                                                   AS risk_level
     FROM machine_metrics mm
-    CROSS JOIN system_config sc
+    CROSS JOIN sc_cfg sc
     WHERE $WHERE$
     GROUP BY mm.recorded_at, sc.contract_demand_kva
   )
@@ -33,29 +40,35 @@ router.get("/trend", async (req, res) => {
       where = "mm.recorded_at::date BETWEEN $1::date AND $2::date";
       params.push(from, to);
     } else {
-      where = "mm.recorded_at >= NOW() - INTERVAL '24 hours'";
+      // Default to today's progression only; avoids mixing two dates under the same HH:MM label.
+      where = "mm.recorded_at >= date_trunc('day', NOW()) AND mm.recorded_at <= NOW()";
     }
     // Aggregate raw ticks into 15-minute MAX demand buckets
     const sql = DEMAND_CTE.replace("$WHERE$", where) + `
-      SELECT
-        TO_CHAR(
+      , bucketed AS (
+        SELECT
           DATE_TRUNC('hour', recorded_at) +
-          FLOOR(EXTRACT(MINUTE FROM recorded_at) / 15) * INTERVAL '15 minutes',
-          'HH24:MI'
-        )                                              AS time,
-        ROUND(MAX(demand_kva)::numeric, 1)             AS demand,
-        MAX(contract_demand_kva)                       AS contract,
-        ROUND(MAX(utilization_pct)::numeric, 1)        AS utilization_pct,
+          FLOOR(EXTRACT(MINUTE FROM recorded_at) / 15) * INTERVAL '15 minutes' AS bucket_ts,
+          MAX(demand_kva) AS demand,
+          MAX(contract_demand_kva) AS contract,
+          MAX(utilization_pct) AS utilization_pct
+        FROM demand_ticks
+        GROUP BY
+          DATE_TRUNC('hour', recorded_at) +
+          FLOOR(EXTRACT(MINUTE FROM recorded_at) / 15) * INTERVAL '15 minutes'
+      )
+      SELECT
+        TO_CHAR(bucket_ts, 'HH24:MI')                  AS time,
+        ROUND(demand::numeric, 1)                      AS demand,
+        contract                                        AS contract,
+        ROUND(utilization_pct::numeric, 1)             AS utilization_pct,
         CASE
-          WHEN MAX(demand_kva) >= MAX(contract_demand_kva) * 0.95 THEN 'Critical'
-          WHEN MAX(demand_kva) >= MAX(contract_demand_kva) * 0.80 THEN 'Warning'
+          WHEN demand >= contract * 0.95 THEN 'Critical'
+          WHEN demand >= contract * 0.80 THEN 'Warning'
           ELSE 'Normal'
         END                                            AS risk_level
-      FROM demand_ticks
-      GROUP BY
-        DATE_TRUNC('hour', recorded_at) +
-        FLOOR(EXTRACT(MINUTE FROM recorded_at) / 15) * INTERVAL '15 minutes'
-      ORDER BY 1`;
+      FROM bucketed
+      ORDER BY bucket_ts`;
     const { rows } = await pool.query(sql, params);
     res.json(rows);
   } catch (err) {
@@ -78,7 +91,12 @@ router.get("/current", async (_req, res) => {
            ELSE 'Normal'
          END AS risk_level
        FROM machine_metrics mm
-       CROSS JOIN system_config sc
+       CROSS JOIN (
+         SELECT COALESCE(
+           (SELECT contract_demand_kva FROM system_config ORDER BY created_at DESC LIMIT 1),
+           85
+         ) AS contract_demand_kva
+       ) sc
        WHERE mm.recorded_at = (SELECT MAX(recorded_at) FROM machine_metrics)
        GROUP BY sc.contract_demand_kva`
     );

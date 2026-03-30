@@ -17,7 +17,7 @@ export default function ProductionAnalytics() {
 
   useEffect(() => {
     apiClient.get("/metrics/realtime").then(r => setMachines(r.data)).catch(() => {});
-    apiClient.get("/production/by-shift").then(r => setShiftProduction(r.data)).catch(() => {});
+    apiClient.get("/production/by-shift?scope=elapsed").then(r => setShiftProduction(r.data)).catch(() => {});
     apiClient.get("/production/weekly").then(r => setWeeklyData(r.data)).catch(() => {});
   }, []);
 
