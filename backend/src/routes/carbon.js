@@ -192,19 +192,18 @@ router.get("/by-machine-interval", async (req, res) => {
     const effectiveEmissionFactor = ef * (1 - (rp / 100));
 
     const { rows } = await pool.query(
-      `SELECT 
-        TO_CHAR(DATE_TRUNC('hour', recorded_at) + INTERVAL '15 min' * FLOOR(EXTRACT(minute FROM recorded_at) / 15), 'HH24:MI') as time_val, 
-        machine_id, 
-        ROUND((AVG(kw) * 0.25)::numeric, 4) as kwh, 
-        ROUND((AVG(kw) * 0.25 * $1)::numeric, 4) as co2 
-       FROM machine_metrics 
-       WHERE recorded_at >= CURRENT_DATE AND recorded_at < CURRENT_DATE + INTERVAL '1 day'
-       GROUP BY time_val, machine_id 
-       ORDER BY time_val ASC`,
+      `SELECT
+          TO_CHAR(DATE_TRUNC('hour', recorded_at), 'HH24:00') as time_val,
+          machine_id,
+          ROUND(AVG(kw)::numeric, 4) as kwh,
+          ROUND((AVG(kw) * $1)::numeric, 4) as co2
+         FROM machine_metrics
+         WHERE recorded_at >= CURRENT_DATE AND recorded_at < CURRENT_DATE + INTERVAL '1 day'
+         GROUP BY time_val, machine_id
+         ORDER BY time_val ASC`,
       [effectiveEmissionFactor]
     );
 
-    // Pivot the data to generate a unified timeseries array with machines as keys
     const timeMap = {};
     rows.forEach(r => {
       if (!timeMap[r.time_val]) {
@@ -217,6 +216,81 @@ router.get("/by-machine-interval", async (req, res) => {
     res.json(Object.values(timeMap));
   } catch (err) {
     console.error("GET /carbon/by-machine-interval error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/carbon/daily-comparison — day-over-day carbon metrics comparison
+router.get("/daily-comparison", async (_req, res) => {
+  try {
+    const { rows: configRows } = await pool.query(
+      "SELECT grid_emission_factor, renewable_percent FROM system_config LIMIT 1"
+    );
+    const cfg = configRows[0] || { grid_emission_factor: 0.82, renewable_percent: 22 };
+    const ef = parseFloat(cfg.grid_emission_factor);
+    const rp = parseFloat(cfg.renewable_percent);
+    const effectiveEmissionFactor = ef * (1 - (rp / 100));
+
+    const { rows } = await pool.query(
+      `WITH today_data AS (
+         SELECT 
+           COALESCE(SUM(energy_kwh_used), 0) AS total_kwh,
+           COALESCE(SUM(parts_produced), 0)  AS total_parts
+         FROM machine_parts_produced
+         WHERE recorded_at::date = CURRENT_DATE
+       ),
+       yesterday_data AS (
+         SELECT 
+           COALESCE(SUM(energy_kwh_used), 0) AS total_kwh,
+           COALESCE(SUM(parts_produced), 0)  AS total_parts
+         FROM machine_parts_produced
+         WHERE recorded_at::date = CURRENT_DATE - INTERVAL '1 day'
+       )
+       SELECT
+         t.total_kwh AS today_kwh,
+         t.total_parts AS today_parts,
+         y.total_kwh AS yesterday_kwh,
+         y.total_parts AS yesterday_parts
+       FROM today_data t, yesterday_data y`
+    );
+
+    const data = rows[0] || {};
+    const todayKwh = parseFloat(data.today_kwh) || 0;
+    const todayParts = parseInt(data.today_parts) || 0;
+    const yesterdayKwh = parseFloat(data.yesterday_kwh) || 0;
+    const yesterdayParts = parseInt(data.yesterday_parts) || 0;
+
+    // Calculate CO2 emissions
+    const todayCO2 = Math.round(todayKwh * effectiveEmissionFactor * 100) / 100;
+    const yesterdayCO2 = Math.round(yesterdayKwh * effectiveEmissionFactor * 100) / 100;
+
+    // Calculate carbon intensity
+    const todayIntensity = todayParts > 0 ? Math.round((todayCO2 / todayParts) * 1000) / 1000 : 0;
+    const yesterdayIntensity = yesterdayParts > 0 ? Math.round((yesterdayCO2 / yesterdayParts) * 1000) / 1000 : 0;
+
+    // Calculate percentage changes
+    const co2Change = yesterdayCO2 > 0 
+      ? parseFloat((((todayCO2 - yesterdayCO2) / yesterdayCO2) * 100).toFixed(1))
+      : 0;
+
+    const intensityChange = yesterdayIntensity > 0
+      ? parseFloat((((todayIntensity - yesterdayIntensity) / yesterdayIntensity) * 100).toFixed(1))
+      : 0;
+
+    res.json({
+      co2: {
+        today: todayCO2,
+        yesterday: yesterdayCO2,
+        percentChange: co2Change,
+      },
+      carbonIntensity: {
+        today: todayIntensity,
+        yesterday: yesterdayIntensity,
+        percentChange: intensityChange,
+      },
+    });
+  } catch (err) {
+    console.error("GET /carbon/daily-comparison error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

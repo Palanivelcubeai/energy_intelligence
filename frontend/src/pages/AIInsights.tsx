@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiClient } from "@/services/apiClient";
-import type { InsightData } from "@/data/mockData";
+import type { InsightData } from "@/types";
 import { InsightCard } from "@/components/InsightCard";
 import { Brain } from "lucide-react";
 

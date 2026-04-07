@@ -18,22 +18,28 @@ export default function PeakDemand() {
   const [contractDemand, setContractDemand] = useState<number>(85);
 
   useEffect(() => {
-    apiClient.get("/demand/trend").then(r => {
-      const mapped = r.data.map((p: { time: string; demand: number; contract: number }) => ({
-        time: p.time,
-        demand: Number(p.demand),
-        contract: Number(p.contract),
-      }));
-      setData(mapped);
-      if (mapped.length > 0 && mapped[0].contract) setContractDemand(mapped[0].contract);
-    }).catch(() => {});
-    apiClient.get("/demand/peak-events").then(r => {
-      setPeakEvents(r.data.map((e: { time: string; demand: number; risk_level: string }) => ({
-        time: e.time,
-        demand: Number(e.demand),
-        risk_level: e.risk_level,
-      })));
-    }).catch(() => {});
+    const fetchDemand = () => {
+      apiClient.get("/demand/trend").then(r => {
+        const mapped = r.data.map((p: { time: string; demand: number; contract: number }) => ({
+          time: p.time,
+          demand: Number(p.demand),
+          contract: Number(p.contract),
+        }));
+        setData(mapped);
+        if (mapped.length > 0 && mapped[0].contract) setContractDemand(mapped[0].contract);
+      }).catch(() => {});
+      apiClient.get("/demand/peak-events").then(r => {
+        setPeakEvents(r.data.map((e: { time: string; demand: number; risk_level: string }) => ({
+          time: e.time,
+          demand: Number(e.demand),
+          risk_level: e.risk_level,
+        })));
+      }).catch(() => {});
+    };
+
+    fetchDemand();
+    const interval = setInterval(fetchDemand, 15000);
+    return () => clearInterval(interval);
   }, []);
 
   const maxDemand = data.length ? Math.max(...data.map(d => d.demand)) : 0;

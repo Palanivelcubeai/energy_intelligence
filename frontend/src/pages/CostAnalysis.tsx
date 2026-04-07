@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { apiClient } from "@/services/apiClient";
 import { KPICard } from "@/components/KPICard";
-import { DollarSign, AlertTriangle, TrendingDown } from "lucide-react";
+import { IndianRupee, AlertTriangle, TrendingDown } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend
 } from "recharts";
@@ -10,20 +10,46 @@ const tt = { contentStyle: { backgroundColor: '#ffffff', border: '1px solid hsl(
 const COLORS = ['hsl(187, 80%, 50%)', 'hsl(152, 60%, 45%)', 'hsl(38, 92%, 50%)', 'hsl(217, 80%, 55%)', 'hsl(270, 60%, 55%)'];
 
 interface CostMachine { id: string; energyCost: number; idleCost: number; costPerPart: number }
-interface CostBreakdown { energyRate: number; demandCharge: number; contractDemand: number; machines: CostMachine[] }
+interface CostBreakdown {
+  energyRate: number;
+  demandCharge: number;
+  contractDemand: number;
+  machines: CostMachine[];
+  actualMonthlyCost?: number;
+  actualMonthlyIdleCost?: number;
+  peakDemandKVA?: number;
+  actualDemandCharge?: number;
+  billingPeakDemandKVA?: number;
+  billingDemandCharge?: number;
+}
 
 export default function CostAnalysis() {
   const [costData, setCostData] = useState<CostBreakdown>({ energyRate: 8.5, demandCharge: 350, contractDemand: 85, machines: [] });
 
   useEffect(() => {
-    apiClient.get("/cost/breakdown").then(r => setCostData(r.data)).catch(() => {});
+    const fetchCostBreakdown = () => {
+      apiClient.get("/cost/breakdown").then(r => setCostData(r.data)).catch(() => {});
+    };
+    fetchCostBreakdown();
+    const interval = setInterval(fetchCostBreakdown, 15000);
+    return () => clearInterval(interval);
   }, []);
 
-  const totalDailyCost = costData.machines.reduce((s, m) => s + m.energyCost, 0);
-  const totalIdleCost = costData.machines.reduce((s, m) => s + m.idleCost, 0);
+  const totalDailyCost = Math.round(costData.machines.reduce((s, m) => s + m.energyCost, 0));
+  const totalIdleCost = Math.round(costData.machines.reduce((s, m) => s + m.idleCost, 0));
+
+  // Use actual monthly cost from backend if available, otherwise estimate
+  const monthlyEstimate = Math.round(costData.actualMonthlyCost || (totalDailyCost * 26));
+  
+  // Prefer billing demand charge (month-to-date peak), then fallback to live/today excess model
+  const demandCharge = Math.round(costData.actualDemandCharge !== undefined 
+    ? (costData.billingDemandCharge !== undefined ? costData.billingDemandCharge : costData.actualDemandCharge)
+    : (Number(costData.contractDemand) * Number(costData.demandCharge)));
 
   // Compute idle waste banner dynamically from real API data
-  const monthlyIdleWaste = Math.round(totalIdleCost * 26);
+  const monthlyIdleWaste = costData.actualMonthlyIdleCost !== undefined 
+    ? Math.round(costData.actualMonthlyIdleCost)
+    : Math.round(totalIdleCost * 26);
   const sortedByIdle = [...costData.machines].sort((a, b) => b.idleCost - a.idleCost);
   const top2 = sortedByIdle.slice(0, 2);
   const top2IdleSum = top2.reduce((s, m) => s + m.idleCost, 0);
@@ -45,10 +71,20 @@ export default function CostAnalysis() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KPICard title="Daily Energy Cost" value={`₹${totalDailyCost.toLocaleString()}`} icon={<DollarSign className="h-4 w-4" />} variant="primary" />
-        <KPICard title="Monthly Est." value={`₹${(totalDailyCost * 26).toLocaleString()}`} />
-        <KPICard title="Demand Charge" value={`₹${(Number(costData.contractDemand) * Number(costData.demandCharge)).toLocaleString()}`} />
-        <KPICard title="Idle Waste Cost" value={`₹${totalIdleCost}`} icon={<TrendingDown className="h-4 w-4" />} variant="destructive" />
+        <KPICard title="Today's Energy Cost" value={`₹${totalDailyCost.toLocaleString()}`} icon={<IndianRupee className="h-4 w-4" />} variant="primary" />     
+        <KPICard 
+          title="Monthly Actual" 
+          value={`₹${monthlyEstimate.toLocaleString()}`}
+          subtitle={costData.actualMonthlyCost ? "Month-to-date" : "Est. (26 days)"}
+        />
+        <KPICard 
+          title="Demand Charge" 
+          value={`₹${demandCharge.toLocaleString()}`}
+          subtitle={costData.billingPeakDemandKVA
+            ? `Billing peak (MTD): ${costData.billingPeakDemandKVA} kVA`
+            : (costData.peakDemandKVA ? `Peak: ${costData.peakDemandKVA} kVA` : `Contract: ${costData.contractDemand} kVA`)}
+        />
+        <KPICard title="Idle Waste Cost" value={`₹${totalIdleCost.toLocaleString()}`} icon={<TrendingDown className="h-4 w-4" />} variant="destructive" />
       </div>
 
       {/* Wasted Energy Banner — computed from real API data */}

@@ -12,7 +12,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 export function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const [isDark, setIsDark] = useState(false);
+  const [isDark, setIsDark] = useState(() => {
+    const savedTheme = localStorage.getItem("theme");
+    if (savedTheme === "dark") return true;
+    if (savedTheme === "light") return false;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
   const [now, setNow] = useState(new Date());
   const { plantName } = usePlantConfig();
   const { name, role, logout } = useAuth();
@@ -20,6 +25,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
+    localStorage.setItem("theme", isDark ? "dark" : "light");
   }, [isDark]);
 
   // Tick the clock every second

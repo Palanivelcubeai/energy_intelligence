@@ -13,7 +13,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger
 } from "@/components/ui/alert-dialog";
 import { Users, Plus, Pencil, Trash2, Eye, EyeOff } from "lucide-react";
-import { type UserRecord } from "@/data/carbonData";
+import { type UserRecord } from "@/types";
 
 interface UserWithAdmin extends UserRecord {
   is_main_admin?: boolean;

@@ -24,6 +24,7 @@ app.use("/api/carbon", require("./routes/carbon"));
 app.use("/api/config", require("./routes/config"));
 app.use("/api/users", require("./routes/users"));
 app.use("/api/reports", require("./routes/reports"));
+app.use("/api/maintenance", require("./routes/maintenance"));
 
 // Health check
 app.get("/api/health", async (_req, res) => {

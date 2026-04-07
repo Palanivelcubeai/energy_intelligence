@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { InsightData } from "@/data/mockData";
+import { InsightData } from "@/types";
 import { AlertTriangle, Info, CheckCircle, XCircle } from "lucide-react";
 
 const severityConfig = {

@@ -9,7 +9,7 @@ import {
   Shield, Save, Building2, Zap, Cpu, Bell
 } from "lucide-react";
 import { apiClient } from "@/services/apiClient";
-import type { SystemConfig, MachineConfig } from "@/data/carbonData";
+import type { SystemConfig, MachineConfig } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { usePlantConfig } from "@/context/PlantConfigContext";
 
@@ -19,7 +19,7 @@ export default function AdminConfig() {
   const [config, setConfig] = useState<SystemConfig>({
     plantName: '', location: '', industryType: '', machineCount: 0,
     tariffPerKwh: 0, contractDemand: 0, gridEmissionFactor: 0, demandPenaltyRate: 0,
-    renewablePercent: 0, pfMinimum: 0, thdMaximum: 0, idleTimeThreshold: 0,
+    renewablePercent: 0, pfMinimum: 0, thdMaximum: 0, idleTimeThreshold: 0, heatThreshold: 85,
     demandWarningPercent: 0, energyPerPartDeviation: 0,
   });
   const [machines, setMachines] = useState<MachineConfig[]>([]);
@@ -121,10 +121,14 @@ export default function AdminConfig() {
               <Input type="number" step="0.5" value={config.idleTimeThreshold} onChange={e => updateConfig('idleTimeThreshold', parseFloat(e.target.value) || 0)} className="font-mono" />
             </div>
             <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Heat Threshold (°C)</Label>
+              <Input type="number" value={config.heatThreshold} onChange={e => updateConfig('heatThreshold', parseFloat(e.target.value) || 0)} className="font-mono" />
+            </div>
+            <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Demand Warning (%)</Label>
               <Input type="number" value={config.demandWarningPercent} onChange={e => updateConfig('demandWarningPercent', parseFloat(e.target.value) || 0)} className="font-mono" />
             </div>
-            <div className="space-y-1.5 col-span-2">
+            <div className="space-y-1.5 col-span-2 xl:col-span-1">
               <Label className="text-xs text-muted-foreground">Energy/Part Deviation (%)</Label>
               <Input type="number" value={config.energyPerPartDeviation} onChange={e => updateConfig('energyPerPartDeviation', parseFloat(e.target.value) || 0)} className="font-mono" />
             </div>

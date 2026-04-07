@@ -12,13 +12,10 @@ import psycopg2
 import random
 from datetime import date, datetime, timedelta, timezone
 
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "energy_db",
-    "user": "postgres",
-    "password": "12345",
-}
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from db_config import DB_CONFIG
 
 # ── Machine list (must match the machines table) ──────────────────────
 MACHINE_IDS = ["CNC-1", "CNC-2", "CNC-3", "CNC-4", "CNC-5"]

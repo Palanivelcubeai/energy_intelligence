@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { MachineData, generateMachineTrend } from "@/data/mockData";
+import { MachineData } from "@/types";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 
 interface MachineCardProps {
@@ -21,7 +21,7 @@ const statusGlow = {
 
 export function MachineCard({ machine, onClick }: MachineCardProps) {
   const status = statusConfig[machine.status];
-  const trendData = generateMachineTrend(machine.id);
+  const trendData = machine.trend || [];
 
   return (
     <div

@@ -8,13 +8,10 @@ Run: python create_config_tables.py
 
 import psycopg2
 
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "energy_db",
-    "user": "postgres",
-    "password": "12345",
-}
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from db_config import DB_CONFIG
 
 
 def main():
@@ -48,6 +45,7 @@ def main():
                 pf_minimum              NUMERIC(4,2)  NOT NULL DEFAULT 0,
                 thd_maximum             NUMERIC(5,2)  NOT NULL DEFAULT 0,
                 idle_time_threshold_hrs NUMERIC(5,2)  NOT NULL DEFAULT 0,
+                heat_threshold_c        NUMERIC(5,2)  NOT NULL DEFAULT 85,
                 demand_warning_percent  INTEGER       NOT NULL DEFAULT 0,
                 energy_per_part_deviation INTEGER     NOT NULL DEFAULT 0,
 
@@ -68,18 +66,23 @@ def main():
                     tariff_per_kwh, contract_demand_kva, grid_emission_factor,
                     demand_penalty_rate, renewable_percent,
                     pf_minimum, thd_maximum, idle_time_threshold_hrs,
-                    demand_warning_percent, energy_per_part_deviation
+                    heat_threshold_c, demand_warning_percent, energy_per_part_deviation
                 ) VALUES (
                     'CNC Works', 'Chennai, India', 'CNC Manufacturing', 5,
                     8.50, 100.00, 0.82,
                     200.00, 0,
                     0.85, 5.00, 2.00,
+                    85.00,
                     80, 15
                 );
             """)
             print("  ✓ Default config inserted.\n")
         else:
             print(f"  Config row already exists ({count} row(s)).\n")
+
+        # Ensure newly added config columns exist for older databases
+        cur.execute("ALTER TABLE system_config ADD COLUMN IF NOT EXISTS heat_threshold_c NUMERIC(5,2) NOT NULL DEFAULT 85;")
+        print("  ✓ Ensured heat_threshold_c column exists in system_config.\n")
 
         # ── 2. Add columns to machines table ──────────────────────────
         print("Adding rated_power_kw and production_target to machines table...")

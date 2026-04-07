@@ -39,6 +39,7 @@ CREATE TABLE system_config (
     pf_minimum                NUMERIC(4,2)   NOT NULL DEFAULT 0.9,
     thd_maximum               NUMERIC(6,2)   NOT NULL DEFAULT 5,
     idle_time_threshold_hrs   NUMERIC(5,1)   NOT NULL DEFAULT 1.5,
+    heat_threshold_c          NUMERIC(5,1)   NOT NULL DEFAULT 85,
     demand_warning_percent    INT            NOT NULL DEFAULT 90 CHECK (demand_warning_percent BETWEEN 0 AND 100),
     energy_per_part_deviation INT            NOT NULL DEFAULT 15,
     created_at                TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
@@ -90,6 +91,10 @@ CREATE TABLE machine_metrics (
     -- Runtime
     runtime_hours             NUMERIC(7,1),
     idle_hours                NUMERIC(7,1),
+
+    -- Predictive maintenance condition signals
+    machine_heat_c            NUMERIC(6,2),
+    machine_vibration_mm_s    NUMERIC(6,2),
 
     -- Production
     parts_produced            INT,
@@ -281,11 +286,11 @@ INSERT INTO system_config (
     plant_name, location, industry_type, machine_count,
     tariff_per_kwh, contract_demand_kva, grid_emission_factor,
     demand_penalty_rate, renewable_percent, pf_minimum,
-    thd_maximum, idle_time_threshold_hrs, demand_warning_percent,
+    thd_maximum, idle_time_threshold_hrs, heat_threshold_c, demand_warning_percent,
     energy_per_part_deviation
 ) VALUES (
     'Precision CNC Works', 'Pune, Maharashtra', 'Automotive Components', 5,
-    8.5, 85, 0.82, 350, 22, 0.9, 5, 1.5, 90, 15
+    8.5, 85, 0.82, 350, 22, 0.9, 5, 1.5, 85, 90, 15
 );
 
 -- Machines

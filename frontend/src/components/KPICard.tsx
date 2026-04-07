@@ -5,6 +5,7 @@ interface KPICardProps {
   title: string;
   value: string | number;
   unit?: string;
+  subtitle?: string;
   icon?: ReactNode;
   trend?: { value: number; label: string };
   variant?: 'default' | 'primary' | 'success' | 'warning' | 'destructive';
@@ -19,7 +20,7 @@ const variantStyles = {
   destructive: 'border-destructive/30 glow-destructive',
 };
 
-export function KPICard({ title, value, unit, icon, trend, variant = 'default', className }: KPICardProps) {
+export function KPICard({ title, value, unit, subtitle, icon, trend, variant = 'default', className }: KPICardProps) {
   return (
     <div className={cn("kpi-card", variantStyles[variant], className)}>
       <div className="flex items-start justify-between mb-2">
@@ -30,6 +31,11 @@ export function KPICard({ title, value, unit, icon, trend, variant = 'default', 
         <span className="text-2xl font-bold font-mono text-foreground">{value}</span>
         {unit && <span className="text-sm text-muted-foreground">{unit}</span>}
       </div>
+      {subtitle && (
+        <div className="mt-1">
+          <span className="text-xs text-muted-foreground">{subtitle}</span>
+        </div>
+      )}
       {trend && (
         <div className="mt-2 flex items-center gap-1">
           <span className={cn("text-xs font-mono", trend.value >= 0 ? "text-success" : "text-destructive")}>

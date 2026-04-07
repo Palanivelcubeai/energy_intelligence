@@ -42,12 +42,15 @@ export default function EnergyVsOutput() {
     }).catch(() => {}).finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchData(from, to); }, []);
+  useEffect(() => {
+    fetchData(from, to);
+    const interval = setInterval(() => fetchData(from, to), 30000);
+    return () => clearInterval(interval);
+  }, [from, to]);
 
   const handleDateChange = (f: Date, t: Date) => {
     setFrom(f);
     setTo(t);
-    fetchData(f, t);
   };
 
   const isEmpty = data.length === 0;

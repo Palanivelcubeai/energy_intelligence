@@ -11,13 +11,10 @@ Run: python create_split_config_tables.py
 
 import psycopg2
 
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "energy_db",
-    "user": "postgres",
-    "password": "12345",
-}
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from db_config import DB_CONFIG
 
 # ── DDL ───────────────────────────────────────────────────────────────
 

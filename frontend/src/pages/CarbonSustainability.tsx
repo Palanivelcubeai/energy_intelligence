@@ -38,19 +38,30 @@ export default function CarbonSustainability() {
   const [co2Trend, setCo2Trend] = useState<CO2Trend[]>([]);
   const [co2ByMachine, setCo2ByMachine] = useState<CO2Machine[]>([]);
   const [carbonInsights, setCarbonInsights] = useState<CarbonInsight[]>([]);
+  const [carbonComparison, setCarbonComparison] = useState<{
+    co2: { percentChange: number };
+    carbonIntensity: { percentChange: number };
+  } | null>(null);
 
   useEffect(() => {
-    apiClient.get("/carbon/metrics").then(r => setMetrics(r.data)).catch(() => {});
-    apiClient.get("/carbon/trend").then(r => setCo2Trend(r.data)).catch(() => {});
-    apiClient.get("/carbon/by-machine").then(r => {
-      const mapped = (r.data || []).map((m: { name: string; co2: number | string; kwh: number | string }) => ({
-        name: m.name,
-        co2: Number(m.co2) || 0,
-        kwh: Number(m.kwh) || 0,
-      }));
-      setCo2ByMachine(mapped);
-    }).catch(() => {});
-    apiClient.get("/carbon/insights").then(r => setCarbonInsights(r.data)).catch(() => {});
+    const fetchCarbon = () => {
+      apiClient.get("/carbon/metrics").then(r => setMetrics(r.data)).catch(() => {});
+      apiClient.get("/carbon/trend").then(r => setCo2Trend(r.data)).catch(() => {});
+      apiClient.get("/carbon/by-machine").then(r => {
+        const mapped = (r.data || []).map((m: { name: string; co2: number | string; kwh: number | string }) => ({
+          name: m.name,
+          co2: Number(m.co2) || 0,
+          kwh: Number(m.kwh) || 0,
+        }));
+        setCo2ByMachine(mapped);
+      }).catch(() => {});
+      apiClient.get("/carbon/insights").then(r => setCarbonInsights(r.data)).catch(() => {});
+      apiClient.get("/carbon/daily-comparison").then(r => setCarbonComparison(r.data)).catch(() => {});
+    };
+
+    fetchCarbon();
+    const interval = setInterval(fetchCarbon, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -67,9 +78,21 @@ export default function CarbonSustainability() {
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <KPICard title="CO₂ Today" value={metrics.totalCO2Today.toFixed(1)} unit="kg" icon={<Factory className="h-4 w-4" />} trend={{ value: -2.8, label: 'vs yesterday' }} />
+        <KPICard 
+          title="CO₂ Today" 
+          value={metrics.totalCO2Today.toFixed(1)} 
+          unit="kg" 
+          icon={<Factory className="h-4 w-4" />} 
+          trend={carbonComparison ? { value: carbonComparison.co2.percentChange, label: 'vs yesterday' } : undefined}
+        />
         <KPICard title="CO₂ This Month" value={metrics.totalCO2Month.toFixed(2)} unit="tons" icon={<Leaf className="h-4 w-4" />} />
-        <KPICard title="Carbon Intensity" value={metrics.carbonIntensity.toFixed(3)} unit="kg/part" icon={<Gauge className="h-4 w-4" />} trend={{ value: -1.2, label: 'improving' }} />
+        <KPICard 
+          title="Carbon Intensity" 
+          value={metrics.carbonIntensity.toFixed(3)} 
+          unit="kg/part" 
+          icon={<Gauge className="h-4 w-4" />} 
+          trend={carbonComparison ? { value: carbonComparison.carbonIntensity.percentChange, label: 'improving' } : undefined}
+        />
         <KPICard title="Renewable %" value={metrics.renewablePercent} unit="%" icon={<Sun className="h-4 w-4" />} variant="success" />
         <KPICard title="Carbon Saved" value={metrics.carbonSaved.toFixed(1)} unit="kg" icon={<Recycle className="h-4 w-4" />} variant="success" />
         <KPICard title="Sustainability" value={metrics.sustainabilityScore} unit="/100" icon={<Award className="h-4 w-4" />} variant={metrics.sustainabilityScore >= 70 ? 'success' : 'warning'} />

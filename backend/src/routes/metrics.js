@@ -174,16 +174,25 @@ router.get("/load-curve", async (_req, res) => {
     const { rows } = await pool.query(
       // Step 1: sum kW across all machines per tick → plant load at that instant
       // Step 2: average those plant-load snapshots per hour → representative hourly load
-      `SELECT TO_CHAR(recorded_at, 'HH24:00') AS time,
-              ROUND(AVG(plant_kw)::numeric, 1) AS value
-       FROM (
+      `WITH hours AS (
+         SELECT generate_series(
+           date_trunc('day', NOW()), 
+           date_trunc('day', NOW()) + interval '23 hours', 
+           interval '1 hour'
+         ) AS hour_bucket
+       ),
+       plant_snapshots AS (
          SELECT recorded_at, SUM(kw) AS plant_kw
          FROM machine_metrics
          WHERE recorded_at >= date_trunc('day', NOW())
          GROUP BY recorded_at
-       ) t
-       GROUP BY TO_CHAR(recorded_at, 'HH24:00'), date_trunc('hour', recorded_at)
-       ORDER BY date_trunc('hour', recorded_at)`
+       )
+       SELECT TO_CHAR(h.hour_bucket, 'HH24:00') AS time,
+              COALESCE(ROUND(AVG(p.plant_kw)::numeric, 1), 0) AS value
+       FROM hours h
+       LEFT JOIN plant_snapshots p ON date_trunc('hour', p.recorded_at) = h.hour_bucket
+       GROUP BY h.hour_bucket
+       ORDER BY h.hour_bucket`
     );
     res.json(rows.map(r => ({ time: r.time, value: parseFloat(r.value) || 0 })));
   } catch (err) {
@@ -204,7 +213,14 @@ router.get("/production-trend", async (req, res) => {
       // machine_metrics stores CUMULATIVE parts/kwh per machine per day.
       // To get incremental per hour, compute MAX per machine per IST-hour bucket,
       // then take the delta vs the previous bucket with LAG().
-      `WITH per_machine_hour AS (
+      `WITH hours AS (
+         SELECT generate_series(
+           DATE_TRUNC('day', NOW() AT TIME ZONE 'Asia/Kolkata'),
+           DATE_TRUNC('day', NOW() AT TIME ZONE 'Asia/Kolkata') + interval '23 hours',
+           interval '1 hour'
+         ) AS hour_bucket
+       ),
+       per_machine_hour AS (
          SELECT
            machine_id,
            DATE_TRUNC('hour', recorded_at AT TIME ZONE 'Asia/Kolkata') AS bucket_ist,
@@ -218,28 +234,132 @@ router.get("/production-trend", async (req, res) => {
          GROUP BY machine_id, DATE_TRUNC('hour', recorded_at AT TIME ZONE 'Asia/Kolkata')
        ),
        with_delta AS (
+           SELECT
+             bucket_ist,
+             CASE
+               WHEN max_parts < COALESCE(LAG(max_parts, 1, 0) OVER (PARTITION BY machine_id ORDER BY bucket_ist), 0)
+               THEN max_parts
+               ELSE max_parts - COALESCE(LAG(max_parts, 1, 0) OVER (PARTITION BY machine_id ORDER BY bucket_ist), 0)
+             END AS hour_parts,
+             CASE
+               WHEN max_kwh < COALESCE(LAG(max_kwh, 1, 0) OVER (PARTITION BY machine_id ORDER BY bucket_ist), 0)
+               THEN max_kwh
+               ELSE max_kwh - COALESCE(LAG(max_kwh, 1, 0) OVER (PARTITION BY machine_id ORDER BY bucket_ist), 0)
+             END AS hour_kwh
+           FROM per_machine_hour
+         ),
+         aggregated_delta AS (
          SELECT
            bucket_ist,
-           GREATEST(0,
-             max_parts - LAG(max_parts, 1, 0) OVER (PARTITION BY machine_id ORDER BY bucket_ist)
-           ) AS hour_parts,
-           GREATEST(0,
-             max_kwh - LAG(max_kwh, 1, 0.0) OVER (PARTITION BY machine_id ORDER BY bucket_ist)
-           ) AS hour_kwh
-         FROM per_machine_hour
+           SUM(hour_parts) AS production,
+           SUM(hour_kwh) AS energy
+         FROM with_delta
+         GROUP BY bucket_ist
        )
        SELECT
-         TO_CHAR(bucket_ist, 'HH24:00') AS time,
-         SUM(hour_parts)                AS production,
-         ROUND(SUM(hour_kwh)::numeric, 2) AS energy
-       FROM with_delta
-       GROUP BY bucket_ist
-       ORDER BY bucket_ist`,
+         TO_CHAR(h.hour_bucket, 'HH24:00') AS time,
+         COALESCE(SUM(a.production), 0)    AS production,
+         COALESCE(ROUND(SUM(a.energy)::numeric, 2), 0) AS energy
+       FROM hours h
+       LEFT JOIN aggregated_delta a ON a.bucket_ist = h.hour_bucket
+       GROUP BY h.hour_bucket
+       ORDER BY h.hour_bucket`,
       params
     );
     res.json(rows.map(r => ({ time: r.time, production: parseInt(r.production) || 0, energy: parseFloat(r.energy) || 0 })));
   } catch (err) {
     console.error("GET /metrics/production-trend error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/metrics/daily-comparison — day-over-day percentage changes for KPIs
+router.get("/daily-comparison", async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `WITH today_data AS (
+         SELECT 
+           COALESCE(SUM(energy_kwh_used), 0) AS total_energy,
+           COALESCE(SUM(parts_produced), 0) AS total_parts
+         FROM machine_parts_produced
+         WHERE recorded_at::date = CURRENT_DATE
+       ),
+       yesterday_data AS (
+         SELECT 
+           COALESCE(SUM(energy_kwh_used), 0) AS total_energy,
+           COALESCE(SUM(parts_produced), 0) AS total_parts
+         FROM machine_parts_produced
+         WHERE recorded_at::date = CURRENT_DATE - INTERVAL '1 day'
+       ),
+       config AS (
+         SELECT tariff_per_kwh FROM system_config LIMIT 1
+       )
+       SELECT
+         t.total_energy AS today_energy,
+         y.total_energy AS yesterday_energy,
+         CASE 
+           WHEN y.total_energy > 0 THEN
+             ROUND(((t.total_energy - y.total_energy) / y.total_energy * 100)::numeric, 1)
+           ELSE 0
+         END AS energy_percent_change,
+         t.total_parts AS today_parts,
+         y.total_parts AS yesterday_parts,
+         CASE 
+           WHEN y.total_parts > 0 THEN
+             ROUND(((t.total_parts - y.total_parts)::numeric / y.total_parts * 100)::numeric, 1)
+           ELSE 0
+         END AS parts_percent_change,
+         ROUND((t.total_energy * c.tariff_per_kwh)::numeric, 0) AS today_cost,
+         ROUND((y.total_energy * c.tariff_per_kwh)::numeric, 0) AS yesterday_cost,
+         CASE 
+           WHEN y.total_energy > 0 THEN
+             ROUND(((t.total_energy - y.total_energy) / y.total_energy * 100)::numeric, 1)
+           ELSE 0
+         END AS cost_percent_change,
+         CASE 
+           WHEN t.total_parts > 0 THEN
+             ROUND((t.total_energy / t.total_parts)::numeric, 2)
+           ELSE 0
+         END AS today_energy_per_part,
+         CASE 
+           WHEN y.total_parts > 0 THEN
+             ROUND((y.total_energy / y.total_parts)::numeric, 2)
+           ELSE 0
+         END AS yesterday_energy_per_part
+       FROM today_data t, yesterday_data y, config c`
+    );
+
+    const data = rows[0] || {};
+    
+    // Calculate energy per part percentage change
+    const energyPerPartChange = data.yesterday_energy_per_part > 0
+      ? parseFloat((((data.today_energy_per_part - data.yesterday_energy_per_part) / data.yesterday_energy_per_part) * 100).toFixed(1))
+      : 0;
+
+    res.json({
+      energy: {
+        today: parseFloat(data.today_energy) || 0,
+        yesterday: parseFloat(data.yesterday_energy) || 0,
+        percentChange: parseFloat(data.energy_percent_change) || 0,
+      },
+      parts: {
+        today: parseInt(data.today_parts) || 0,
+        yesterday: parseInt(data.yesterday_parts) || 0,
+        percentChange: parseFloat(data.parts_percent_change) || 0,
+      },
+      cost: {
+        today: parseFloat(data.today_cost) || 0,
+        yesterday: parseFloat(data.yesterday_cost) || 0,
+        percentChange: parseFloat(data.cost_percent_change) || 0,
+      },
+      energyPerPart: {
+        today: parseFloat(data.today_energy_per_part) || 0,
+        yesterday: parseFloat(data.yesterday_energy_per_part) || 0,
+        percentChange: energyPerPartChange,
+      },
+    });
+  } catch (err) {
+    console.error("GET /metrics/daily-comparison error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

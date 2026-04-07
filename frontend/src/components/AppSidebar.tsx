@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Monitor, BarChart3, Zap, Gauge, TrendingUp,
-  DollarSign, Brain, FileText, ChevronLeft, Leaf, Shield, Users
+  IndianRupee, Brain, FileText, ChevronLeft, Leaf, Shield, Users, Wrench
 } from "lucide-react";
 import appIcon from "/clean.png";
 import { NavLink } from "@/components/NavLink";
@@ -21,7 +21,8 @@ const navItems = [
   { title: "Energy vs Output", url: "/energy-output", icon: Zap },
   { title: "Power Quality", url: "/power-quality", icon: Gauge },
   { title: "Peak Demand", url: "/peak-demand", icon: TrendingUp },
-  { title: "Cost Analysis", url: "/cost-analysis", icon: DollarSign },
+  { title: "Cost Analysis", url: "/cost-analysis", icon: IndianRupee },
+  { title: "Predictive Maintenance", url: "/predictive-maintenance", icon: Wrench },
   { title: "Carbon & Sustainability", url: "/carbon", icon: Leaf },
   { title: "Reports", url: "/reports", icon: FileText },
   { title: "AI Insights", url: "/ai-insights", icon: Brain },

@@ -14,6 +14,7 @@ import EnergyVsOutput from "./pages/EnergyVsOutput";
 import PowerQuality from "./pages/PowerQuality";
 import PeakDemand from "./pages/PeakDemand";
 import CostAnalysis from "./pages/CostAnalysis";
+import PredictiveMaintenance from "./pages/PredictiveMaintenance";
 import AIInsights from "./pages/AIInsights";
 import Reports from "./pages/Reports";
 import CarbonSustainability from "./pages/CarbonSustainability";
@@ -45,6 +46,7 @@ const App = () => (
           <Route path="/power-quality" element={<ProtectedPage><PowerQuality /></ProtectedPage>} />
           <Route path="/peak-demand" element={<ProtectedPage><PeakDemand /></ProtectedPage>} />
           <Route path="/cost-analysis" element={<ProtectedPage><CostAnalysis /></ProtectedPage>} />
+          <Route path="/predictive-maintenance" element={<ProtectedPage><PredictiveMaintenance /></ProtectedPage>} />
           <Route path="/ai-insights" element={<ProtectedPage><AIInsights /></ProtectedPage>} />
           <Route path="/reports" element={<ProtectedPage><Reports /></ProtectedPage>} />
           <Route path="/carbon" element={<ProtectedPage><CarbonSustainability /></ProtectedPage>} />

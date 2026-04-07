@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiClient } from "@/services/apiClient";
-import type { MachineData } from "@/data/mockData";
+import type { MachineData } from "@/types";
 import { KPICard } from "@/components/KPICard";
 import { Package, Target } from "lucide-react";
 import {
@@ -16,9 +16,14 @@ export default function ProductionAnalytics() {
   const [weeklyData, setWeeklyData] = useState<{ record_date?: string; day?: string; production: number }[]>([]);
 
   useEffect(() => {
-    apiClient.get("/metrics/realtime").then(r => setMachines(r.data)).catch(() => {});
-    apiClient.get("/production/by-shift?scope=elapsed").then(r => setShiftProduction(r.data)).catch(() => {});
-    apiClient.get("/production/weekly").then(r => setWeeklyData(r.data)).catch(() => {});
+    const fetchProduction = () => {
+      apiClient.get("/metrics/realtime").then(r => setMachines(r.data)).catch(() => {});
+      apiClient.get("/production/by-shift?scope=elapsed").then(r => setShiftProduction(r.data)).catch(() => {});
+      apiClient.get("/production/weekly").then(r => setWeeklyData(r.data)).catch(() => {});
+    };
+    fetchProduction();
+    const interval = setInterval(fetchProduction, 15000);
+    return () => clearInterval(interval);
   }, []);
 
   // Recompute weekly chart data whenever machines (targets) or raw weekly data changes

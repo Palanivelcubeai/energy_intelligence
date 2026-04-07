@@ -19,7 +19,12 @@ export default function PowerQuality() {
   const [powerQualityData, setPowerQualityData] = useState<PQData[]>([]);
 
   useEffect(() => {
-    apiClient.get("/power-quality/by-machine").then(r => setPowerQualityData(r.data)).catch(() => {});
+    const fetchPowerQuality = () => {
+      apiClient.get("/power-quality/by-machine").then(r => setPowerQualityData(r.data)).catch(() => {});
+    };
+    fetchPowerQuality();
+    const interval = setInterval(fetchPowerQuality, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   const activePQ = powerQualityData.filter(p => p.healthScore > 0);

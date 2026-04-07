@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiClient } from "@/services/apiClient";
-import type { MachineData } from "@/data/mockData";
+import type { MachineData } from "@/types";
 import { MachineCard } from "@/components/MachineCard";
 import { KPICard } from "@/components/KPICard";
 import { Button } from "@/components/ui/button";

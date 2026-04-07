@@ -20,6 +20,7 @@ router.get("/", async (_req, res) => {
       pfMinimum: parseFloat(c.pf_minimum),
       thdMaximum: parseFloat(c.thd_maximum),
       idleTimeThreshold: parseFloat(c.idle_time_threshold_hrs),
+      heatThreshold: parseFloat(c.heat_threshold_c),
       demandWarningPercent: c.demand_warning_percent,
       energyPerPartDeviation: c.energy_per_part_deviation,
     });
@@ -47,15 +48,16 @@ router.put("/", async (req, res) => {
          pf_minimum = COALESCE($10, pf_minimum),
          thd_maximum = COALESCE($11, thd_maximum),
          idle_time_threshold_hrs = COALESCE($12, idle_time_threshold_hrs),
-         demand_warning_percent = COALESCE($13, demand_warning_percent),
-         energy_per_part_deviation = COALESCE($14, energy_per_part_deviation),
+         heat_threshold_c = COALESCE($13, heat_threshold_c),
+         demand_warning_percent = COALESCE($14, demand_warning_percent),
+         energy_per_part_deviation = COALESCE($15, energy_per_part_deviation),
          updated_at = NOW()
        RETURNING *`,
       [
         b.plantName, b.location, b.industryType, b.machineCount,
         b.tariffPerKwh, b.contractDemand, b.gridEmissionFactor, b.demandPenaltyRate,
         b.renewablePercent, b.pfMinimum, b.thdMaximum, b.idleTimeThreshold,
-        b.demandWarningPercent, b.energyPerPartDeviation,
+        b.heatThreshold, b.demandWarningPercent, b.energyPerPartDeviation,
       ]
     );
     res.json(rows[0]);

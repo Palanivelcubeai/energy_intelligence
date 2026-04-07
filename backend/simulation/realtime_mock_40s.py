@@ -14,34 +14,32 @@ from fetch_machine_details import (
     get_hour_load_multiplier,
 )
 
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "energy_db",
-    "user": "postgres",
-    "password": "12345",
-}
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from db_config import DB_CONFIG
 
 DEFAULT_INTERVAL_SEC = 40
 STOP_REQUESTED = False
+DEFAULT_TEST_MODE = "normal"
 
-INSERT_METRIC_SQL = """
-    INSERT INTO machine_metrics (
-        machine_id, recorded_at,
-        kw, kwh, power_factor,
-        voltage_r, voltage_y, voltage_b,
-        current_r, current_y, current_b,
-        parts_produced, energy_per_part, rejection_count,
-        runtime_hours, idle_hours, efficiency_score
-    ) VALUES (
-        %s, %s,
-        %s, %s, %s,
-        %s, %s, %s,
-        %s, %s, %s,
-        %s, %s, %s,
-        %s, %s, %s
-    )
-"""
+BASE_METRIC_COLUMNS = [
+    "machine_id", "recorded_at",
+    "kw", "kwh", "power_factor",
+    "voltage_r", "voltage_y", "voltage_b",
+    "current_r", "current_y", "current_b",
+    "parts_produced", "energy_per_part", "rejection_count",
+    "runtime_hours", "idle_hours", "efficiency_score",
+]
+
+# Optional columns are inserted only if they exist in machine_metrics table.
+OPTIONAL_SIGNAL_COLUMNS = [
+    "machine_heat_c",
+    "machine_vibration_mm_s",
+]
+
+INSERT_METRIC_SQL = ""
+INSERT_SIGNAL_COLUMNS = []
 
 UPSERT_MACHINE_PARTS_INCREMENT_SQL = """
     INSERT INTO machine_parts_produced (
@@ -183,6 +181,36 @@ def shift_intensity(local_dt: datetime) -> float:
     return 0.58
 
 
+def init_metric_insert_sql(conn):
+    global INSERT_METRIC_SQL, INSERT_SIGNAL_COLUMNS
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'machine_metrics'
+            """
+        )
+        metric_cols = {r[0] for r in cur.fetchall()}
+
+    INSERT_SIGNAL_COLUMNS = [c for c in OPTIONAL_SIGNAL_COLUMNS if c in metric_cols]
+    all_cols = BASE_METRIC_COLUMNS + INSERT_SIGNAL_COLUMNS
+    placeholders = ", ".join(["%s"] * len(all_cols))
+    INSERT_METRIC_SQL = f"""
+        INSERT INTO machine_metrics (
+            {", ".join(all_cols)}
+        ) VALUES (
+            {placeholders}
+        )
+    """
+
+    if INSERT_SIGNAL_COLUMNS:
+        print(f"Signal columns enabled: {', '.join(INSERT_SIGNAL_COLUMNS)}")
+    else:
+        print("Signal columns not found in machine_metrics; generating values in simulator output only.")
+
+
 def generate_machine_tick(profile: dict, local_dt: datetime, tick_hours: float):
     lf_low, lf_high = get_hour_load_multiplier(local_dt.hour, local_dt.minute)
     load_factor = random.uniform(lf_low, lf_high)
@@ -237,6 +265,13 @@ def generate_machine_tick(profile: dict, local_dt: datetime, tick_hours: float):
     cy = round(max(0.0, c_base + random.uniform(-2.8, 2.8)), 1)
     cb = round(max(0.0, c_base + random.uniform(-2.8, 2.8)), 1)
 
+    avg_current = (cr + cy + cb) / 3.0
+    current_imbalance = abs(cr - avg_current) + abs(cy - avg_current) + abs(cb - avg_current)
+
+    # Derived condition signals for predictive maintenance (simulated but physically correlated).
+    heat_c = round(max(28.0, min(125.0, 33.0 + kw * 1.9 + avg_current * 0.25 + current_imbalance * 0.35 + random.uniform(-2.0, 2.0))), 1)
+    vibration_mm_s = round(max(0.4, min(16.0, 0.7 + current_imbalance * 0.08 + (1.0 - pf) * 4.0 + random.uniform(0.0, 0.6))), 2)
+
     expected_parts = max(0.0, profile["parts_per_hour"] * (effective_load if status == "running" else 0.0) * tick_hours)
     new_parts = int(expected_parts) + (1 if random.random() < (expected_parts % 1) else 0)
     new_rej = sum(1 for _ in range(new_parts) if random.random() < profile["reject_rate"])
@@ -260,7 +295,90 @@ def generate_machine_tick(profile: dict, local_dt: datetime, tick_hours: float):
         "idle_inc": idle_inc,
         "kwh_inc": kwh_inc,
         "eff": eff,
+        "heat_c": heat_c,
+        "vibration_mm_s": vibration_mm_s,
     }
+
+
+def apply_test_mode(machine_id: str, profile: dict, reading: dict, tick_hours: float, test_mode: str):
+    if test_mode != "predictive":
+        return reading
+
+    tuned = dict(reading)
+
+    # Build deterministic risk spread for Predictive Maintenance page testing.
+    if machine_id == "CNC-1":
+        # Healthy baseline machine
+        tuned["kw"] = round(min(tuned["kw"], profile["kw_base"] * 0.95), 2)
+        tuned["pf"] = round(max(0.92, tuned["pf"]), 2)
+        tuned["heat_c"] = round(max(40.0, tuned["heat_c"] - random.uniform(4.0, 8.0)), 1)
+        tuned["vibration_mm_s"] = round(max(0.6, tuned["vibration_mm_s"] - random.uniform(0.2, 0.5)), 2)
+        tuned["eff"] = min(98, tuned["eff"] + random.randint(3, 7))
+
+    elif machine_id == "CNC-2":
+        # Critical behavior: overheating + high vibration + overload
+        tuned["kw"] = round(max(tuned["kw"], profile["kw_base"] * random.uniform(1.25, 1.4)), 2)
+        tuned["pf"] = round(max(0.72, min(0.88, tuned["pf"] - random.uniform(0.07, 0.12))), 2)
+        tuned["heat_c"] = round(min(125.0, tuned["heat_c"] + random.uniform(16.0, 24.0)), 1)
+        tuned["vibration_mm_s"] = round(min(16.0, tuned["vibration_mm_s"] + random.uniform(2.2, 4.0)), 2)
+        tuned["new_parts"] = max(0, int(tuned["new_parts"] * 0.45))
+        tuned["new_rej"] += random.randint(2, 5)
+        tuned["eff"] = max(35, tuned["eff"] - random.randint(20, 35))
+
+    elif machine_id == "CNC-3":
+        # Low health + high power per part
+        tuned["kw"] = round(max(tuned["kw"], profile["kw_base"] * random.uniform(1.0, 1.15)), 2)
+        tuned["heat_c"] = round(min(120.0, tuned["heat_c"] + random.uniform(8.0, 14.0)), 1)
+        tuned["vibration_mm_s"] = round(min(12.0, tuned["vibration_mm_s"] + random.uniform(1.0, 2.0)), 2)
+        tuned["new_parts"] = max(0, int(tuned["new_parts"] * 0.35))
+        tuned["new_rej"] += random.randint(1, 3)
+        tuned["eff"] = max(42, tuned["eff"] - random.randint(15, 28))
+
+    elif machine_id == "CNC-4":
+        # Medium risk profile
+        tuned["kw"] = round(max(tuned["kw"], profile["kw_base"] * random.uniform(1.05, 1.18)), 2)
+        tuned["heat_c"] = round(min(115.0, tuned["heat_c"] + random.uniform(4.0, 9.0)), 1)
+        tuned["vibration_mm_s"] = round(min(10.0, tuned["vibration_mm_s"] + random.uniform(0.6, 1.3)), 2)
+        tuned["new_rej"] += random.randint(0, 2)
+        tuned["eff"] = max(55, tuned["eff"] - random.randint(5, 14))
+
+    elif machine_id == "CNC-5":
+        # Vibration-focused high risk case
+        tuned["kw"] = round(max(tuned["kw"], profile["kw_base"] * random.uniform(1.1, 1.25)), 2)
+        tuned["heat_c"] = round(min(118.0, tuned["heat_c"] + random.uniform(6.0, 12.0)), 1)
+        tuned["vibration_mm_s"] = round(min(16.0, tuned["vibration_mm_s"] + random.uniform(2.0, 3.5)), 2)
+        tuned["new_parts"] = max(0, int(tuned["new_parts"] * 0.6))
+        tuned["new_rej"] += random.randint(1, 4)
+        tuned["eff"] = max(45, tuned["eff"] - random.randint(12, 24))
+
+    tuned["kwh_inc"] = round(tuned["kw"] * tick_hours, 4)
+    return tuned
+
+
+def build_metric_values(machine_id, now_utc, reading, totals):
+    values = {
+        "machine_id": machine_id,
+        "recorded_at": now_utc,
+        "kw": reading["kw"],
+        "kwh": totals["kwh"],
+        "power_factor": reading["pf"],
+        "voltage_r": reading["vr"],
+        "voltage_y": reading["vy"],
+        "voltage_b": reading["vb"],
+        "current_r": reading["cr"],
+        "current_y": reading["cy"],
+        "current_b": reading["cb"],
+        "parts_produced": totals["parts"],
+        "energy_per_part": totals["epp"],
+        "rejection_count": totals["rej"],
+        "runtime_hours": totals["rt"],
+        "idle_hours": totals["idle"],
+        "efficiency_score": reading["eff"],
+        "machine_heat_c": reading["heat_c"],
+        "machine_vibration_mm_s": reading["vibration_mm_s"],
+    }
+
+    return tuple(values[c] for c in (BASE_METRIC_COLUMNS + INSERT_SIGNAL_COLUMNS))
 
 
 def fetch_daily_totals(cur, machine_id: str, day_start_utc: datetime):
@@ -290,7 +408,7 @@ def clean_future_rows_once(conn):
         conn.commit()
 
 
-def run_simulation(conn, interval_sec: int, max_ticks: int = 0):
+def run_simulation(conn, interval_sec: int, max_ticks: int = 0, test_mode: str = DEFAULT_TEST_MODE):
     tick_hours = interval_sec / 3600.0
     ticks = 0
 
@@ -308,11 +426,13 @@ def run_simulation(conn, interval_sec: int, max_ticks: int = 0):
 
         cur = conn.cursor()
         statuses = {}
+        signal_rows = []
 
         try:
             for machine_id, profile in PROFILES.items():
                 totals = fetch_daily_totals(cur, machine_id, day_start_utc)
                 reading = generate_machine_tick(profile, local_now, tick_hours)
+                reading = apply_test_mode(machine_id, profile, reading, tick_hours, test_mode)
 
                 total_kwh = round(totals["kwh"] + reading["kwh_inc"], 4)
                 total_parts = totals["parts"] + reading["new_parts"]
@@ -321,27 +441,18 @@ def run_simulation(conn, interval_sec: int, max_ticks: int = 0):
                 total_idle = round(totals["idle"] + reading["idle_inc"], 4)
                 epp = round(total_kwh / total_parts, 3) if total_parts > 0 else totals["last_epp"]
 
+                total_snapshot = {
+                    "kwh": total_kwh,
+                    "parts": total_parts,
+                    "rej": total_rej,
+                    "rt": total_rt,
+                    "idle": total_idle,
+                    "epp": epp,
+                }
+
                 cur.execute(
                     INSERT_METRIC_SQL,
-                    (
-                        machine_id,
-                        now_utc,
-                        reading["kw"],
-                        total_kwh,
-                        reading["pf"],
-                        reading["vr"],
-                        reading["vy"],
-                        reading["vb"],
-                        reading["cr"],
-                        reading["cy"],
-                        reading["cb"],
-                        total_parts,
-                        epp,
-                        total_rej,
-                        total_rt,
-                        total_idle,
-                        reading["eff"],
-                    ),
+                    build_metric_values(machine_id, now_utc, reading, total_snapshot),
                 )
 
                 cur.execute(
@@ -362,6 +473,7 @@ def run_simulation(conn, interval_sec: int, max_ticks: int = 0):
 
                 cur.execute("UPDATE machines SET status = %s WHERE id = %s", (reading["status"], machine_id))
                 statuses[machine_id] = reading["status"]
+                signal_rows.append((reading["heat_c"], reading["vibration_mm_s"]))
 
             upsert_shift_and_daily_summary(cur, shift_day)
             conn.commit()
@@ -375,7 +487,12 @@ def run_simulation(conn, interval_sec: int, max_ticks: int = 0):
         ticks += 1
         stamp = now_utc.strftime("%Y-%m-%d %H:%M:%S")
         status_line = "  ".join([f"{mid}={st}" for mid, st in sorted(statuses.items())])
-        print(f"[{stamp}] {shift_name} | {status_line}")
+        if signal_rows:
+            avg_heat = round(sum(x[0] for x in signal_rows) / len(signal_rows), 1)
+            avg_vib = round(sum(x[1] for x in signal_rows) / len(signal_rows), 2)
+            print(f"[{stamp}] {shift_name} | {status_line} | avgHeat={avg_heat}C avgVib={avg_vib}mm/s")
+        else:
+            print(f"[{stamp}] {shift_name} | {status_line}")
 
         if max_ticks > 0 and ticks >= max_ticks:
             print(f"Reached max ticks ({max_ticks}). Exiting.")
@@ -404,6 +521,12 @@ def parse_args():
         action="store_true",
         help="Skip startup cleanup of rows with recorded_at > NOW().",
     )
+    parser.add_argument(
+        "--test-mode",
+        choices=["normal", "predictive"],
+        default=DEFAULT_TEST_MODE,
+        help="normal: regular plant behavior, predictive: risk-spread scenario for Predictive Maintenance page testing.",
+    )
     return parser.parse_args()
 
 
@@ -421,11 +544,13 @@ def main():
         if inserted:
             print(f"Added {inserted} missing machine master row(s).")
 
+        init_metric_insert_sql(conn)
+
         if not args.no_clean_future:
             clean_future_rows_once(conn)
             print("Startup cleanup complete: removed future-dated rows.")
 
-        run_simulation(conn, args.interval_sec, args.max_ticks)
+        run_simulation(conn, args.interval_sec, args.max_ticks, args.test_mode)
 
     except psycopg2.Error as e:
         print(f"Database error: {e}")
