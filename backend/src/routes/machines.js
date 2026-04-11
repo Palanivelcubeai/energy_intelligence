@@ -5,7 +5,7 @@ const pool = require("../db");
 router.get("/", async (_req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT m.id, m.name, m.status, m.rated_power_kw, m.production_target, m.product_type
+      `SELECT m.id, m.name, m.status, m.rated_power_kw, m.production_target, m.product_type, m.heat_threshold_c
        FROM machines m ORDER BY m.id`
     );
     res.json(rows);
@@ -69,12 +69,13 @@ router.get("/:id/trend", async (req, res) => {
 // PUT /api/machines/:id/config — update machine config
 router.put("/:id/config", async (req, res) => {
   try {
-    const { name, rated_power_kw, production_target, status } = req.body;
+    const { name, rated_power_kw, production_target, status, heat_threshold_c } = req.body;
     const { rows } = await pool.query(
       `UPDATE machines SET name = COALESCE($1, name), rated_power_kw = COALESCE($2, rated_power_kw),
-       production_target = COALESCE($3, production_target), status = COALESCE($4, status)
-       WHERE id = $5 RETURNING *`,
-      [name, rated_power_kw, production_target, status, req.params.id]
+       production_target = COALESCE($3, production_target), status = COALESCE($4, status),
+       heat_threshold_c = COALESCE($5, heat_threshold_c)
+       WHERE id = $6 RETURNING *`,
+      [name, rated_power_kw, production_target, status, heat_threshold_c, req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: "Machine not found" });
     res.json(rows[0]);

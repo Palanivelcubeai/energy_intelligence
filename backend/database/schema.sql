@@ -55,6 +55,7 @@ CREATE TABLE machines (
     status            VARCHAR(20)  NOT NULL CHECK (status IN ('running', 'idle', 'maintenance')),
     rated_power_kw    NUMERIC(10,2) NOT NULL,
     production_target INT           NOT NULL,
+    heat_threshold_c  NUMERIC(5,1)  NOT NULL DEFAULT 85,
     product_type      VARCHAR(100),
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -294,12 +295,12 @@ INSERT INTO system_config (
 );
 
 -- Machines
-INSERT INTO machines (id, name, status, rated_power_kw, production_target, product_type) VALUES
-    ('CNC-1', 'CNC-1 (Haas VF-2)',  'running',     22, 160, 'Shaft'),
-    ('CNC-2', 'CNC-2 (DMG Mori)',   'running',     26, 140, 'Gear'),
-    ('CNC-3', 'CNC-3 (Mazak)',      'idle',        20, 120, 'Housing'),
-    ('CNC-4', 'CNC-4 (Fanuc)',      'running',     18, 170, 'Bracket'),
-    ('CNC-5', 'CNC-5 (Okuma)',      'maintenance', 15,  80, 'Pin');
+INSERT INTO machines (id, name, status, rated_power_kw, production_target, heat_threshold_c, product_type) VALUES
+    ('CNC-1', 'CNC-1 (Haas VF-2)',  'running',     22, 160, 84, 'Shaft'),
+    ('CNC-2', 'CNC-2 (DMG Mori)',   'running',     26, 140, 88, 'Gear'),
+    ('CNC-3', 'CNC-3 (Mazak)',      'idle',        20, 120, 86, 'Housing'),
+    ('CNC-4', 'CNC-4 (Fanuc)',      'running',     18, 170, 82, 'Bracket'),
+    ('CNC-5', 'CNC-5 (Okuma)',      'maintenance', 15,  80, 87, 'Pin');
 
 -- Default users (passwords should be hashed in production)
 INSERT INTO users (name, email, password_hash, role) VALUES

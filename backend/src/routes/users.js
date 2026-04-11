@@ -41,15 +41,40 @@ router.post("/", async (req, res) => {
 // PUT /api/users/:id
 router.put("/:id", async (req, res) => {
   try {
-    const { name, email, role, password, currentPassword } = req.body;
-    if (!currentPassword) {
-      return res.status(400).json({ error: "Current password is required to edit user" });
+    const { name, email, role, password, currentPassword, adminEmail, adminPassword } = req.body;
+
+    const { rows: targetRows } = await pool.query("SELECT id, password_hash FROM users WHERE id = $1", [req.params.id]);
+    if (targetRows.length === 0) return res.status(404).json({ error: "User not found" });
+
+    let authorized = false;
+
+    if (currentPassword) {
+      const validCurrent = await bcrypt.compare(currentPassword, targetRows[0].password_hash);
+      if (validCurrent) {
+        authorized = true;
+      }
     }
-    // Verify current password
-    const { rows: userRows } = await pool.query("SELECT password_hash FROM users WHERE id = $1", [req.params.id]);
-    if (userRows.length === 0) return res.status(404).json({ error: "User not found" });
-    const valid = await bcrypt.compare(currentPassword, userRows[0].password_hash);
-    if (!valid) return res.status(401).json({ error: "Current password is incorrect" });
+
+    if (!authorized && adminEmail && adminPassword) {
+      const { rows: adminRows } = await pool.query(
+        `SELECT password_hash, role
+         FROM users
+         WHERE LOWER(email) = LOWER($1)
+         LIMIT 1`,
+        [String(adminEmail).trim()]
+      );
+
+      if (adminRows.length > 0 && adminRows[0].role === "admin") {
+        const adminValid = await bcrypt.compare(adminPassword, adminRows[0].password_hash);
+        if (adminValid) {
+          authorized = true;
+        }
+      }
+    }
+
+    if (!authorized) {
+      return res.status(401).json({ error: "Current password or admin credentials are incorrect" });
+    }
 
     let query, params;
     if (password) {

@@ -55,6 +55,7 @@ router.get("/predictive", async (_req, res) => {
          m.name,
          m.status,
          m.rated_power_kw,
+         m.heat_threshold_c,
          COALESCE(mm.kw, 0) AS kw,
          COALESCE(mm.kwh, 0) AS kwh,
          COALESCE(mm.pf, 0) AS pf,
@@ -112,6 +113,7 @@ router.get("/predictive", async (_req, res) => {
 
     const machinePredictions = rows.map((r) => {
       const ratedPowerKw = toNumber(r.rated_power_kw, 1);
+      const machineHeatThresholdC = toNumber(r.heat_threshold_c, heatThresholdC);
       const powerKw = toNumber(r.kw, 0);
       const prevPowerKw = toNumber(r.prev_kw, powerKw);
       const runtimeHours = toNumber(r.runtime_hours, 0);
@@ -217,7 +219,7 @@ router.get("/predictive", async (_req, res) => {
       }
 
       const alerts = [];
-      if (heatC >= heatThresholdC) alerts.push("High machine heat detected");
+      if (heatC >= machineHeatThresholdC) alerts.push("High machine heat detected");
       if (powerLoadPct >= 110) alerts.push("Power draw exceeding rated load");
       if (powerPerPartKwh >= 0.55) alerts.push("Power consumed per part is high");
       if (vibrationMmS >= 4.5) alerts.push("Vibration above safe threshold");

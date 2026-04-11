@@ -11,11 +11,19 @@ const tt = { contentStyle: { backgroundColor: '#ffffff', border: '1px solid hsl(
 
 interface DemandPoint { time: string; demand: number; contract: number }
 interface PeakEvent { time: string; demand: number; risk_level: string }
+interface AIPrediction {
+  predicted_kva: number;
+  confidence: number;
+  risk_level: "Normal" | "Warning" | "Critical";
+  reasoning: string;
+  source: "ai" | "fallback";
+}
 
 export default function PeakDemand() {
   const [data, setData] = useState<DemandPoint[]>([]);
   const [peakEvents, setPeakEvents] = useState<PeakEvent[]>([]);
   const [contractDemand, setContractDemand] = useState<number>(85);
+  const [aiPrediction, setAiPrediction] = useState<AIPrediction | null>(null);
 
   useEffect(() => {
     const fetchDemand = () => {
@@ -35,6 +43,25 @@ export default function PeakDemand() {
           risk_level: e.risk_level,
         })));
       }).catch(() => {});
+
+      apiClient.get("/demand/ai-prediction?aiOnly=true").then(r => {
+        const p = r.data || {};
+        const source = String(p.source || "").toLowerCase();
+        if (source !== "ai") {
+          setAiPrediction(null);
+          return;
+        }
+
+        setAiPrediction({
+          predicted_kva: Number(p.predicted_kva) || 0,
+          confidence: Number(p.confidence) || 70,
+          risk_level: ["Normal", "Warning", "Critical"].includes(String(p.risk_level)) ? p.risk_level : "Normal",
+          reasoning: String(p.reasoning || "Demand forecast generated from current trend data."),
+          source: "ai",
+        });
+      }).catch(() => {
+        setAiPrediction(null);
+      });
     };
 
     fetchDemand();
@@ -44,8 +71,7 @@ export default function PeakDemand() {
 
   const maxDemand = data.length ? Math.max(...data.map(d => d.demand)) : 0;
   const currentDemand = data.length ? data[data.length - 1].demand : 0;
-  // AI predicted peak: highest recorded today + 3% operational buffer
-  const predictedPeak = maxDemand > 0 ? Math.round(maxDemand * 1.03 * 10) / 10 : 0;
+  const predictedPeak = aiPrediction?.predicted_kva ?? 0;
 
   return (
     <div className="space-y-6">
@@ -58,7 +84,14 @@ export default function PeakDemand() {
         <KPICard title="Contract Demand" value={contractDemand.toString()} unit="kVA" icon={<Zap className="h-4 w-4" />} />
         <KPICard title="Current Demand" value={currentDemand.toFixed(1)} unit="kVA" variant={currentDemand > contractDemand ? 'destructive' : 'primary'} />
         <KPICard title="Max This Month" value={maxDemand.toFixed(1)} unit="kVA" icon={<TrendingUp className="h-4 w-4" />} variant={maxDemand > contractDemand ? 'warning' : 'success'} />
-        <KPICard title="AI Predicted Peak" value={predictedPeak.toFixed(1)} unit="kVA" icon={<Brain className="h-4 w-4" />} variant={predictedPeak > contractDemand ? 'warning' : 'success'} />
+        <KPICard
+          title="AI Predicted Peak"
+          value={aiPrediction ? predictedPeak.toFixed(1) : "--"}
+          unit="kVA"
+          subtitle={aiPrediction ? `AI • ${aiPrediction.confidence}% confidence` : "AI prediction unavailable"}
+          icon={<Brain className="h-4 w-4" />}
+          variant={aiPrediction ? (predictedPeak > contractDemand ? 'warning' : 'success') : 'default'}
+        />
       </div>
 
       <div className="chart-container">

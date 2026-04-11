@@ -14,12 +14,14 @@ export interface MachineData {
 
 export interface InsightData {
   id: string;
-  machineId: string | 'All';
-  type: 'waste' | 'optimization' | 'anomaly';
-  title: string;
-  description: string;
-  impact: string;
-  priority: 'high' | 'medium' | 'low';
+  severity: 'critical' | 'warning' | 'info' | 'success';
+  message: string;
+  financial_impact: string;
+  production_impact: string;
+  confidence: number;
+  suggested_action: string;
+  suggested_actions?: string[];
+  machine: string | null;
 }
 
 export interface UserRecord {
@@ -52,5 +54,6 @@ export interface MachineConfig {
   name: string;
   ratedPower: number;
   productionTarget: number;
+  heatThreshold: number;
   status: 'running' | 'idle' | 'maintenance';
 }

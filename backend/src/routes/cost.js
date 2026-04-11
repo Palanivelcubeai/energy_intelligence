@@ -11,6 +11,7 @@ router.get("/breakdown", async (_req, res) => {
        FROM system_config sc LIMIT 1`
     );
     const config = rows[0] || { energyRate: 8.5, demandCharge: 350, contractDemand: 85 };
+    const rate = parseFloat(config.energyRate);
 
     // Get per-machine costs with actual rated power for idle calculation
     const { rows: machineRows } = await pool.query(
@@ -34,10 +35,28 @@ router.get("/breakdown", async (_req, res) => {
        JOIN machines m ON m.id = mp.machine_id
        WHERE mp.recorded_at::date >= DATE_TRUNC('month', CURRENT_DATE)`
     );
+
+    const { rows: monthlyIdleMachineRows } = await pool.query(
+      `SELECT
+         m.id,
+         COALESCE(SUM(mp.idle_hours * (m.rated_power_kw * 0.2)), 0) AS monthly_idle_kwh
+       FROM machines m
+       LEFT JOIN machine_parts_produced mp
+         ON mp.machine_id = m.id
+        AND mp.recorded_at::date >= DATE_TRUNC('month', CURRENT_DATE)
+       GROUP BY m.id
+       ORDER BY m.id`
+    );
+
+    const monthlyIdleByMachine = monthlyIdleMachineRows.map((row) => ({
+      id: row.id,
+      monthlyIdleCost: Math.round((parseFloat(row.monthly_idle_kwh) || 0) * rate * 100) / 100,
+    }));
+
     const monthlyKwh = parseFloat(monthlyRows[0].monthly_kwh) || 0;
     const monthlyIdleKwh = parseFloat(monthlyRows[0].monthly_idle_kwh) || 0;
-    const actualMonthlyCost = Math.round(monthlyKwh * parseFloat(config.energyRate) * 100) / 100;
-    const actualMonthlyIdleCost = Math.round(monthlyIdleKwh * parseFloat(config.energyRate) * 100) / 100;
+    const actualMonthlyCost = Math.round(monthlyKwh * rate * 100) / 100;
+    const actualMonthlyIdleCost = Math.round(monthlyIdleKwh * rate * 100) / 100;
 
     // Calculate actual peak demand (max kVA) for today
     const { rows: demandRows } = await pool.query(
@@ -72,7 +91,6 @@ router.get("/breakdown", async (_req, res) => {
     const billingExcessKVA = Math.max(0, billingPeakDemandKVA - contractKVA);
     const billingDemandCharge = Math.round(billingExcessKVA * penaltyRate * 100) / 100;
 
-    const rate = parseFloat(config.energyRate);
     const machines = machineRows.map((m) => {
       // Use machine-specific rated power for idle cost (assume 20% of rated power when idle)
       const idlePowerKW = parseFloat(m.rated_power_kw) * 0.2;
@@ -87,6 +105,7 @@ router.get("/breakdown", async (_req, res) => {
     res.json({ 
       ...config, 
       machines,
+      monthlyIdleByMachine,
       actualMonthlyCost,
       actualMonthlyIdleCost,
       peakDemandKVA,

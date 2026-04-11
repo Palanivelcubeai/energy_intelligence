@@ -27,9 +27,10 @@ export default function AdminConfig() {
   useEffect(() => {
     apiClient.get("/config").then(r => setConfig(r.data)).catch(() => {});
     apiClient.get("/machines").then(r => {
-      setMachines(r.data.map((m: { id: string; name: string; rated_power_kw: number; production_target: number; status: string }) => ({
+      setMachines(r.data.map((m: { id: string; name: string; rated_power_kw: number; production_target: number; heat_threshold_c: number; status: string }) => ({
         id: m.id, name: m.name, ratedPower: Number(m.rated_power_kw),
-        productionTarget: m.production_target, status: m.status as MachineConfig['status'],
+        productionTarget: m.production_target, heatThreshold: Number(m.heat_threshold_c ?? 85),
+        status: m.status as MachineConfig['status'],
       })));
     }).catch(() => {});
   }, []);
@@ -47,7 +48,11 @@ export default function AdminConfig() {
       await apiClient.put("/config", config);
       await Promise.all(machines.map(m =>
         apiClient.put(`/machines/${m.id}/config`, {
-          name: m.name, rated_power_kw: m.ratedPower, production_target: m.productionTarget, status: m.status,
+          name: m.name,
+          rated_power_kw: m.ratedPower,
+          production_target: m.productionTarget,
+          heat_threshold_c: m.heatThreshold,
+          status: m.status,
         })
       ));
       if (config.plantName) setPlantName(config.plantName);
@@ -121,19 +126,15 @@ export default function AdminConfig() {
               <Input type="number" step="0.5" value={config.idleTimeThreshold} onChange={e => updateConfig('idleTimeThreshold', parseFloat(e.target.value) || 0)} className="font-mono" />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Heat Threshold (°C)</Label>
-              <Input type="number" value={config.heatThreshold} onChange={e => updateConfig('heatThreshold', parseFloat(e.target.value) || 0)} className="font-mono" />
-            </div>
-            <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Demand Warning (%)</Label>
               <Input type="number" value={config.demandWarningPercent} onChange={e => updateConfig('demandWarningPercent', parseFloat(e.target.value) || 0)} className="font-mono" />
             </div>
-            <div className="space-y-1.5 col-span-2 xl:col-span-1">
+            <div className="space-y-1.5 col-span-2">
               <Label className="text-xs text-muted-foreground">Energy/Part Deviation (%)</Label>
               <Input type="number" value={config.energyPerPartDeviation} onChange={e => updateConfig('energyPerPartDeviation', parseFloat(e.target.value) || 0)} className="font-mono" />
             </div>
           </div>
-          <p className="text-[10px] text-muted-foreground">These thresholds affect AI insight generation and alarm triggers across the platform.</p>
+          <p className="text-[10px] text-muted-foreground">These thresholds affect AI insight generation and alarm triggers across the platform. Heat threshold is configured per machine in Machine Configuration below.</p>
         </div>
       </div>
 
@@ -182,6 +183,7 @@ export default function AdminConfig() {
                 <TableHead className="text-xs">Name</TableHead>
                 <TableHead className="text-xs">Rated Power (kW)</TableHead>
                 <TableHead className="text-xs">Production Target</TableHead>
+                <TableHead className="text-xs">Heat Threshold (°C)</TableHead>
                 <TableHead className="text-xs">Status</TableHead>
               </TableRow>
             </TableHeader>
@@ -197,6 +199,9 @@ export default function AdminConfig() {
                   </TableCell>
                   <TableCell>
                     <Input type="number" value={m.productionTarget} onChange={e => updateMachine(m.id, 'productionTarget', parseInt(e.target.value) || 0)} className="h-8 text-xs font-mono w-28" />
+                  </TableCell>
+                  <TableCell>
+                    <Input type="number" value={m.heatThreshold} onChange={e => updateMachine(m.id, 'heatThreshold', parseFloat(e.target.value) || 0)} className="h-8 text-xs font-mono w-28" />
                   </TableCell>
                   <TableCell>
                     <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${

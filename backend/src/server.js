@@ -25,6 +25,7 @@ app.use("/api/config", require("./routes/config"));
 app.use("/api/users", require("./routes/users"));
 app.use("/api/reports", require("./routes/reports"));
 app.use("/api/maintenance", require("./routes/maintenance"));
+app.use("/api/chat-assist", require("./routes/chatAssist"));
 
 // Health check
 app.get("/api/health", async (_req, res) => {

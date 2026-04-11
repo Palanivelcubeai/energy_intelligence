@@ -20,9 +20,11 @@ interface UserWithAdmin extends UserRecord {
 }
 import { useToast } from "@/hooks/use-toast";
 import { apiClient } from "@/services/apiClient";
+import { useAuth } from "@/hooks/useAuth";
 
 export default function Admin() {
   const { toast } = useToast();
+  const { email: loggedInEmail } = useAuth();
   const [users, setUsers] = useState<UserWithAdmin[]>([]);
   const [newUser, setNewUser] = useState({ name: "", email: "", role: "Operator" as UserRecord["role"], password: "" });
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -82,7 +84,8 @@ export default function Admin() {
         name: editUser.name,
         email: editUser.email,
         role: editUser.role,
-        currentPassword: editCurrentPassword,
+        adminEmail: loggedInEmail,
+        adminPassword: editCurrentPassword,
         ...(editNewPassword ? { password: editNewPassword } : {}),
       });
       setEditDialogOpen(false);
@@ -95,7 +98,7 @@ export default function Admin() {
       fetchUsers();
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error || "Failed to update user";
-      if (msg === "Current password is incorrect") {
+      if (msg === "Current password is incorrect" || msg === "Current password or admin credentials are incorrect") {
         setEditPasswordError(msg);
       } else {
         toast({ title: "Error", description: msg, variant: "destructive" });
@@ -240,9 +243,9 @@ export default function Admin() {
                     {editUser && (
                       <div className="space-y-3">
                         <div className="space-y-1.5">
-                          <Label className="text-xs">Current Password <span className="text-destructive">*</span></Label>
+                          <Label className="text-xs">Your Admin Password <span className="text-destructive">*</span></Label>
                           <div className="relative">
-                            <Input type={showPasswords.editCurrent ? "text" : "password"} value={editCurrentPassword} onChange={e => { setEditCurrentPassword(e.target.value); setEditPasswordError(""); }} placeholder="Enter current password to verify" className="pr-8" />
+                            <Input type={showPasswords.editCurrent ? "text" : "password"} value={editCurrentPassword} onChange={e => { setEditCurrentPassword(e.target.value); setEditPasswordError(""); }} placeholder="Enter your admin password to authorize" className="pr-8" />
                             <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowPasswords(p => ({ ...p, editCurrent: !p.editCurrent }))}>
                               {showPasswords.editCurrent ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                             </button>

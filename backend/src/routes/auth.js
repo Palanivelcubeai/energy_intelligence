@@ -7,11 +7,24 @@ const { JWT_SECRET } = require("../middleware/auth");
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password are required" });
+    const rawIdentifier = req.body?.email;
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    const identifier = typeof rawIdentifier === "string" ? rawIdentifier.trim() : "";
+
+    if (!identifier || !password) {
+      return res.status(400).json({ error: "Email/username and password are required" });
     }
-    const { rows } = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+
+    const { rows } = await pool.query(
+      `SELECT *
+       FROM users
+       WHERE LOWER(email) = LOWER($1)
+          OR LOWER(name) = LOWER($1)
+       ORDER BY is_main_admin DESC, created_at ASC
+       LIMIT 1`,
+      [identifier]
+    );
+
     if (rows.length === 0) {
       return res.status(401).json({ error: "Invalid email or password" });
     }

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS machines (
     model        VARCHAR(100) NOT NULL,
     status       VARCHAR(20)  NOT NULL DEFAULT 'idle'
                      CHECK (status IN ('running', 'idle', 'maintenance')),
+    heat_threshold_c NUMERIC(5,2) NOT NULL DEFAULT 85,
     product_type VARCHAR(100) NOT NULL DEFAULT '',
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
@@ -90,11 +91,11 @@ DROP VIEW IF EXISTS v_carbon_overview CASCADE;
 
 # ── 5 CNC Machines seed data ─────────────────────────────────────────
 MACHINES_SEED = [
-    ("CNC-1", "CNC-1", "Haas VF-2",    "running",     "Shaft"),
-    ("CNC-2", "CNC-2", "DMG Mori",     "running",     "Gear"),
-    ("CNC-3", "CNC-3", "Mazak",        "idle",        "Housing"),
-    ("CNC-4", "CNC-4", "Fanuc",        "running",     "Bracket"),
-    ("CNC-5", "CNC-5", "Okuma",        "maintenance", "Pin"),
+    ("CNC-1", "CNC-1", "Haas VF-2",    "running",     84, "Shaft"),
+    ("CNC-2", "CNC-2", "DMG Mori",     "running",     88, "Gear"),
+    ("CNC-3", "CNC-3", "Mazak",        "idle",        86, "Housing"),
+    ("CNC-4", "CNC-4", "Fanuc",        "running",     82, "Bracket"),
+    ("CNC-5", "CNC-5", "Okuma",        "maintenance", 87, "Pin"),
 ]
 
 # Machine profiles for realistic metric generation
@@ -227,7 +228,7 @@ def main():
         print("Step 5: Seeding 5 CNC machines...")
         for m in MACHINES_SEED:
             cur.execute(
-                "INSERT INTO machines (id, name, model, status, product_type) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING;",
+                "INSERT INTO machines (id, name, model, status, heat_threshold_c, product_type) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING;",
                 m,
             )
         print("  5 machines seeded.\n")
@@ -243,10 +244,10 @@ def main():
         tables = [r[0] for r in cur.fetchall()]
         print(f"  Tables in database: {', '.join(tables)}")
 
-        cur.execute("SELECT id, name, model, status, product_type FROM machines ORDER BY id;")
+        cur.execute("SELECT id, name, model, status, heat_threshold_c, product_type FROM machines ORDER BY id;")
         print("\n  Machines:")
         for row in cur.fetchall():
-            print(f"    {row[0]:8s} | {row[2]:12s} | {row[3]:12s} | {row[4]}")
+            print(f"    {row[0]:8s} | {row[2]:12s} | {row[3]:12s} | {row[4]} C | {row[5]}")
 
         cur.execute("SELECT machine_id, COUNT(*), MIN(recorded_at), MAX(recorded_at) FROM machine_metrics GROUP BY machine_id ORDER BY machine_id;")
         print("\n  Metrics per machine:")

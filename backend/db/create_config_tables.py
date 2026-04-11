@@ -85,13 +85,13 @@ def main():
         print("  ✓ Ensured heat_threshold_c column exists in system_config.\n")
 
         # ── 2. Add columns to machines table ──────────────────────────
-        print("Adding rated_power_kw and production_target to machines table...")
+        print("Adding rated_power_kw, production_target, and heat_threshold_c to machines table...")
 
         # Check if columns already exist
         cur.execute("""
             SELECT column_name FROM information_schema.columns
             WHERE table_name = 'machines'
-            AND column_name IN ('rated_power_kw', 'production_target');
+            AND column_name IN ('rated_power_kw', 'production_target', 'heat_threshold_c');
         """)
         existing_cols = [row[0] for row in cur.fetchall()]
 
@@ -107,6 +107,12 @@ def main():
         else:
             print("  production_target already exists.")
 
+        if 'heat_threshold_c' not in existing_cols:
+            cur.execute("ALTER TABLE machines ADD COLUMN heat_threshold_c NUMERIC(5,2) NOT NULL DEFAULT 85;")
+            print("  ✓ Added heat_threshold_c column.")
+        else:
+            print("  heat_threshold_c already exists.")
+
         # Set default rated power values for existing machines
         print("\nSetting default rated power and production targets...")
         # Targets = parts_per_hour × 16 active hours/day × machine efficiency factor
@@ -114,18 +120,18 @@ def main():
         # CNC-3: 12 × 16 × 0.85 = 163       | CNC-4: 20 × 16 × 0.94 = 301
         # CNC-5: 14 × 16 × 0.90 = 202
         defaults = {
-            "CNC-1": (18.5, 265),
-            "CNC-2": (22.0, 228),
-            "CNC-3": (14.0, 163),
-            "CNC-4": (15.8, 301),
-            "CNC-5": (13.0, 202),
+            "CNC-1": (18.5, 265, 84),
+            "CNC-2": (22.0, 228, 88),
+            "CNC-3": (14.0, 163, 86),
+            "CNC-4": (15.8, 301, 82),
+            "CNC-5": (13.0, 202, 87),
         }
-        for machine_id, (power, target) in defaults.items():
+        for machine_id, (power, target, heat_threshold) in defaults.items():
             cur.execute(
-                "UPDATE machines SET rated_power_kw = %s, production_target = %s WHERE id = %s;",
-                (power, target, machine_id),
+                "UPDATE machines SET rated_power_kw = %s, production_target = %s, heat_threshold_c = %s WHERE id = %s;",
+                (power, target, heat_threshold, machine_id),
             )
-            print(f"  {machine_id}: rated_power={power} kW, target={target} parts/day")
+            print(f"  {machine_id}: rated_power={power} kW, target={target} parts/day, heat_threshold={heat_threshold} C")
 
         # ── 3. Verify ────────────────────────────────────────────────
         print("\n── Verification ──")
@@ -137,10 +143,10 @@ def main():
         for col, val in zip(cols, row):
             print(f"  {col}: {val}")
 
-        cur.execute("SELECT id, name, rated_power_kw, production_target, status FROM machines ORDER BY id;")
+        cur.execute("SELECT id, name, rated_power_kw, production_target, heat_threshold_c, status FROM machines ORDER BY id;")
         print("\nmachines:")
         for r in cur.fetchall():
-            print(f"  {r[0]}: {r[1]}, {r[2]} kW, target={r[3]}, {r[4]}")
+            print(f"  {r[0]}: {r[1]}, {r[2]} kW, target={r[3]}, heat_threshold={r[4]} C, {r[5]}")
 
         cur.close()
         print("\n✓ All config tables ready.")

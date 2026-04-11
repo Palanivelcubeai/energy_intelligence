@@ -157,17 +157,54 @@ router.get("/weekly", async (req, res) => {
              THEN (recorded_at::date - INTERVAL '1 day')::date
              ELSE recorded_at::date
            END AS logical_date,
+           machine_id,
            parts_produced,
-           energy_kwh_used
+           energy_kwh_used,
+           production_target
          FROM machine_parts_produced
+       ),
+       current_ctx AS (
+         SELECT
+           CASE
+             WHEN EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) < 6
+             THEN ((NOW() AT TIME ZONE 'Asia/Kolkata')::date - INTERVAL '1 day')::date
+             ELSE (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+           END AS current_logical_date
+       ),
+       current_target AS (
+         SELECT COALESCE(SUM(m.production_target), 0) AS target
+         FROM machines m
+       ),
+       daily_target AS (
+         -- production_target is expected to be per-machine daily target snapshot;
+         -- take max per machine/day then sum across machines to avoid shift-wise double counting.
+         SELECT
+           logical_date,
+           COALESCE(SUM(machine_target), 0) AS target
+         FROM (
+           SELECT
+             logical_date,
+             machine_id,
+             MAX(COALESCE(production_target, 0)) AS machine_target
+           FROM normalized
+           GROUP BY logical_date, machine_id
+         ) t
+         GROUP BY logical_date
        )
        SELECT
-         logical_date AS record_date,
-         SUM(parts_produced) AS production,
-         SUM(energy_kwh_used) AS energy
-       FROM normalized${where}
-       GROUP BY logical_date
-       ORDER BY logical_date`,
+         n.logical_date AS record_date,
+         SUM(n.parts_produced) AS production,
+         SUM(n.energy_kwh_used) AS energy,
+         CASE
+           WHEN n.logical_date = (SELECT current_logical_date FROM current_ctx)
+           THEN (SELECT target FROM current_target)
+           ELSE COALESCE(MAX(dt.target), 0)
+         END AS target
+       FROM normalized n
+       LEFT JOIN daily_target dt ON dt.logical_date = n.logical_date
+       ${where ? where.replace("logical_date", "n.logical_date") : ""}
+       GROUP BY n.logical_date
+       ORDER BY n.logical_date`,
       params
     );
     res.json(rows);

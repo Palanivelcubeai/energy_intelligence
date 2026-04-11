@@ -74,6 +74,13 @@ const COLORS = {
   Critical: "hsl(0, 72%, 51%)",
 };
 
+const MACHINE_DISPLAY_ORDER = ["CNC-1", "CNC-2", "CNC-3", "CNC-4", "CNC-5"];
+
+function getMachineOrderIndex(machineId: string): number {
+  const idx = MACHINE_DISPLAY_ORDER.indexOf(machineId);
+  return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
+}
+
 export default function PredictiveMaintenance() {
   const [data, setData] = useState<PredictiveResponse>({
     summary: { totalMachines: 0, criticalCount: 0, highCount: 0, dueSoonCount: 0, avgRiskScore: 0, avgHealth: 0, avgConfidence: 0 },
@@ -82,17 +89,39 @@ export default function PredictiveMaintenance() {
   });
 
   useEffect(() => {
+    let active = true;
+
     const fetchPredictive = () => {
-      apiClient.get("/maintenance/predictive").then((r) => setData(r.data)).catch(() => {});
+      apiClient
+        .get("/maintenance/predictive")
+        .then((r) => {
+          if (!active) return;
+          setData(r.data);
+        })
+        .catch(() => {});
+    };
+
+    const handleVisibilityRefresh = () => {
+      if (document.visibilityState === "visible") {
+        fetchPredictive();
+      }
     };
 
     fetchPredictive();
     const interval = setInterval(fetchPredictive, 15000);
-    return () => clearInterval(interval);
+    window.addEventListener("focus", handleVisibilityRefresh);
+    document.addEventListener("visibilitychange", handleVisibilityRefresh);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+      window.removeEventListener("focus", handleVisibilityRefresh);
+      document.removeEventListener("visibilitychange", handleVisibilityRefresh);
+    };
   }, []);
 
   const sortedMachines = useMemo(
-    () => [...data.machines].sort((a, b) => b.riskScore - a.riskScore),
+    () => [...data.machines].sort((a, b) => getMachineOrderIndex(a.id) - getMachineOrderIndex(b.id)),
     [data.machines]
   );
 

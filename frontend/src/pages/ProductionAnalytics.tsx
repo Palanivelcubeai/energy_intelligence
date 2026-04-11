@@ -22,7 +22,7 @@ export default function ProductionAnalytics() {
       apiClient.get("/production/weekly").then(r => setWeeklyData(r.data)).catch(() => {});
     };
     fetchProduction();
-    const interval = setInterval(fetchProduction, 15000);
+    const interval = setInterval(fetchProduction, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -31,18 +31,48 @@ export default function ProductionAnalytics() {
     ? machines.reduce((s, m) => s + (m.production_target || 0), 0)
     : 1159;
 
-  const weeklyChartData = (weeklyData as { record_date?: string; day?: string; production: number }[])
-    .map(row => {
+  const getIstDateKey = (date: Date) => new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+
+  const normalizedWeekly = (weeklyData as { record_date?: string; day?: string; production: number; target?: number }[])
+    .map((row) => {
       const d = new Date(row.record_date ?? row.day!);
-      const weekday = d.toLocaleDateString('en-IN', { weekday: 'short' });
-      const dateStr = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
       return {
-        day: `${weekday} ${dateStr}`,
-        production: Number(row.production),
-        target: dailyTarget,
+        key: getIstDateKey(d),
+        date: d,
+        production: Number(row.production) || 0,
+        target: Number(row.target ?? 0) || 0,
       };
-    })
-    .slice(-7);
+    });
+
+  const weeklyByDate = new Map<string, { production: number; target: number }>();
+  normalizedWeekly.forEach((r) => {
+    weeklyByDate.set(r.key, { production: r.production, target: r.target });
+  });
+
+  const recentTarget = [...normalizedWeekly]
+    .reverse()
+    .find((r) => r.target > 0)?.target || dailyTarget;
+
+  const now = new Date();
+  const weeklyChartData = Array.from({ length: 7 }).map((_, idx) => {
+    const d = new Date(now);
+    d.setDate(now.getDate() - (6 - idx));
+    const key = getIstDateKey(d);
+    const row = weeklyByDate.get(key);
+    const weekday = d.toLocaleDateString('en-IN', { weekday: 'short' });
+    const dateStr = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+
+    return {
+      day: `${weekday} ${dateStr}`,
+      production: row?.production ?? 0,
+      target: row?.target && row.target > 0 ? row.target : recentTarget,
+    };
+  });
 
   const machineProduction = machines.map(m => ({
     name: m.id,
@@ -120,7 +150,7 @@ export default function ProductionAnalytics() {
                 <Tooltip {...tt} />
                 <Legend />
                 <Bar dataKey="production" fill="hsl(187, 80%, 50%)" name="Production" radius={[2, 2, 0, 0]} />
-                <Line type="monotone" dataKey="target" stroke="hsl(0, 72%, 51%)" name="Target" strokeDasharray="5 5" dot={false} />
+                <Line type="linear" dataKey="target" stroke="hsl(0, 72%, 51%)" name="Target" strokeDasharray="5 5" dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
