@@ -14,12 +14,21 @@ export default function ProductionAnalytics() {
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [shiftProduction, setShiftProduction] = useState<Record<string, unknown>[]>([]);
   const [weeklyData, setWeeklyData] = useState<{ record_date?: string; day?: string; production: number }[]>([]);
+  const [targetHistory, setTargetHistory] = useState<Array<{
+    id: string;
+    machine_id: string;
+    old_target: number;
+    new_target: number;
+    changed_by?: string;
+    changed_at: string;
+  }>>([]);
 
   useEffect(() => {
     const fetchProduction = () => {
       apiClient.get("/metrics/realtime").then(r => setMachines(r.data)).catch(() => {});
       apiClient.get("/production/by-shift?scope=elapsed").then(r => setShiftProduction(r.data)).catch(() => {});
       apiClient.get("/production/weekly").then(r => setWeeklyData(r.data)).catch(() => {});
+      apiClient.get("/machines/target-history?limit=8").then(r => setTargetHistory(Array.isArray(r.data) ? r.data : [])).catch(() => {});
     };
     fetchProduction();
     const interval = setInterval(fetchProduction, 5000);
@@ -153,6 +162,26 @@ export default function ProductionAnalytics() {
                 <Line type="linear" dataKey="target" stroke="hsl(0, 72%, 51%)" name="Target" strokeDasharray="5 5" dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
+          </div>
+
+          <div className="mt-4 rounded-md border border-border/60 bg-secondary/20 p-3">
+            <h4 className="text-xs font-semibold text-foreground mb-2">Recent Target Changes</h4>
+            {targetHistory.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No recent target changes.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {targetHistory.slice(0, 5).map((item) => (
+                  <div key={item.id} className="flex items-center justify-between text-xs">
+                    <span className="text-foreground">
+                      {item.machine_id}: {item.old_target}{" -> "}{item.new_target}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {new Date(item.changed_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

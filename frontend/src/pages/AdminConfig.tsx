@@ -12,10 +12,12 @@ import { apiClient } from "@/services/apiClient";
 import type { SystemConfig, MachineConfig } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { usePlantConfig } from "@/context/PlantConfigContext";
+import { useAuth } from "@/hooks/useAuth";
 
 export default function AdminConfig() {
   const { toast } = useToast();
   const { setPlantName } = usePlantConfig();
+  const { email } = useAuth();
   const [config, setConfig] = useState<SystemConfig>({
     plantName: '', location: '', industryType: '', machineCount: 0,
     tariffPerKwh: 0, contractDemand: 0, gridEmissionFactor: 0, demandPenaltyRate: 0,
@@ -53,6 +55,8 @@ export default function AdminConfig() {
           production_target: m.productionTarget,
           heat_threshold_c: m.heatThreshold,
           status: m.status,
+          changed_by: email || "admin",
+          source: "admin-config",
         })
       ));
       if (config.plantName) setPlantName(config.plantName);
@@ -134,7 +138,6 @@ export default function AdminConfig() {
               <Input type="number" value={config.energyPerPartDeviation} onChange={e => updateConfig('energyPerPartDeviation', parseFloat(e.target.value) || 0)} className="font-mono" />
             </div>
           </div>
-          <p className="text-[10px] text-muted-foreground">These thresholds affect AI insight generation and alarm triggers across the platform. Heat threshold is configured per machine in Machine Configuration below.</p>
         </div>
       </div>
 

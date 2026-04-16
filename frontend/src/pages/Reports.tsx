@@ -1,11 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { FileText, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
-} from '@/components/ui/dialog';
 import { apiClient } from '@/services/apiClient';
 import ReportTable from '@/components/ReportTable';
+import IntelligenceReportDocument, { type IntelligenceReportDocumentData } from '@/components/IntelligenceReportDocument';
 import ExcelJS from 'exceljs';
 
 const reportColumns: Record<string, { key: string; label: string }[]> = {
@@ -40,31 +38,82 @@ const reportColumns: Record<string, { key: string; label: string }[]> = {
     { key: 'machine', label: 'CNC Machine' }, { key: 'energy_cost', label: 'Energy Cost (₹)' },
     { key: 'idle_cost', label: 'Idle Cost (₹)' }, { key: 'potential_savings', label: 'Potential Savings (₹)' },
   ],
+  intelligence_summary: [
+    { key: 'section', label: 'Section' },
+    { key: 'metric', label: 'Metric' },
+    { key: 'value', label: 'Summary Value' },
+    { key: 'status', label: 'Status' },
+  ],
 };
 
 interface ReportMeta { key: string; name: string; description: string; lastGenerated: string }
 
 export default function Reports() {
   const [reports, setReports] = useState<ReportMeta[]>([]);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [tableData, setTableData] = useState<Record<string, unknown>[]>([]);
-  const [loadingData, setLoadingData] = useState(false);
+  const [reportData, setReportData] = useState<Record<string, Record<string, unknown>[]>>({});
+  const [loadingByKey, setLoadingByKey] = useState<Record<string, boolean>>({});
+  const [intelligenceDoc, setIntelligenceDoc] = useState<IntelligenceReportDocumentData | null>(null);
+  const [loadingIntelligenceDoc, setLoadingIntelligenceDoc] = useState(false);
 
   useEffect(() => {
     apiClient.get("/reports/list").then(r => setReports(r.data)).catch(() => {});
   }, []);
 
-  const selected = reports.find(r => r.key === selectedKey) ?? null;
-  const columns = selectedKey ? (reportColumns[selectedKey] || []) : [];
+  const orderedReports = useMemo(() => {
+    return [...reports].sort((a, b) => {
+      if (a.key === 'intelligence_summary') return -1;
+      if (b.key === 'intelligence_summary') return 1;
+      return 0;
+    });
+  }, [reports]);
 
-  const openReport = (key: string) => {
-    setSelectedKey(key);
-    setLoadingData(true);
-    apiClient.get(`/reports/${key}/data`).then(r => setTableData(r.data)).catch(() => setTableData([])).finally(() => setLoadingData(false));
-  };
+  useEffect(() => {
+    if (orderedReports.length === 0) return;
 
-  const downloadExcel = async (e: React.MouseEvent, report: ReportMeta) => {
-    e.stopPropagation();
+    let cancelled = false;
+    const initLoading: Record<string, boolean> = {};
+    orderedReports.forEach((r) => { initLoading[r.key] = true; });
+    setLoadingByKey(initLoading);
+
+    Promise.all(
+      orderedReports.map(async (report) => {
+        try {
+          const { data } = await apiClient.get(`/reports/${report.key}/data`);
+          return { key: report.key, data: Array.isArray(data) ? data : [] };
+        } catch {
+          return { key: report.key, data: [] as Record<string, unknown>[] };
+        }
+      })
+    ).then((results) => {
+      if (cancelled) return;
+
+      const nextData: Record<string, Record<string, unknown>[]> = {};
+      const nextLoading: Record<string, boolean> = {};
+      results.forEach((r) => {
+        nextData[r.key] = r.data;
+        nextLoading[r.key] = false;
+      });
+
+      setReportData(nextData);
+      setLoadingByKey(nextLoading);
+    });
+
+    const hasIntelligence = orderedReports.some((r) => r.key === 'intelligence_summary');
+    if (hasIntelligence) {
+      setLoadingIntelligenceDoc(true);
+      apiClient
+        .get('/reports/intelligence-summary/document')
+        .then((r) => setIntelligenceDoc(r.data))
+        .catch(() => setIntelligenceDoc(null))
+        .finally(() => setLoadingIntelligenceDoc(false));
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [orderedReports]);
+
+  const downloadExcel = async (report: ReportMeta) => {
     const cols = reportColumns[report.key] || [];
     try {
       const { data } = await apiClient.get(`/reports/${report.key}/data`);
@@ -93,64 +142,79 @@ export default function Reports() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Reports</h1>
-        <p className="text-sm text-muted-foreground">Generate and download operational reports</p>
+        <p className="text-sm text-muted-foreground">All reports are visible below. Intelligence Summary is pinned at the top.</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {reports.map(r => (
-          <div
-            key={r.key}
-            className="kpi-card cursor-pointer transition-all hover:ring-1 hover:ring-primary/50"
-            onClick={() => openReport(r.key)}
-          >
-            <div className="flex items-start gap-3">
-              <div className="h-10 w-10 rounded-md bg-primary/10 flex items-center justify-center shrink-0">
-                <FileText className="h-5 w-5 text-primary" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <h3 className="text-sm font-semibold text-foreground">{r.name}</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">{r.description}</p>
-                <div className="flex items-center gap-3 mt-2">
-                  <span className="text-[10px] text-muted-foreground">Format: Excel</span>
-                  <span className="text-[10px] text-muted-foreground">Last: {r.lastGenerated ? new Date(r.lastGenerated).toLocaleDateString() : 'Never'}</span>
-                </div>
-                <div className="flex gap-2 mt-3">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="text-xs h-7"
-                    onClick={(e) => downloadExcel(e, r)}
-                  >
-                    <Download className="h-3 w-3 mr-1" /> Download Excel
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
+      <div className="space-y-5">
+        {orderedReports.map((r) => {
+          const cols = reportColumns[r.key] || [];
+          const data = reportData[r.key] || [];
+          const isLoading = loadingByKey[r.key];
 
-      <Dialog open={!!selected} onOpenChange={open => { if (!open) setSelectedKey(null); }}>
-        <DialogContent className="max-w-5xl max-h-[85vh] overflow-y-auto">
-          {selected && (
-            <>
-              <DialogHeader>
-                <DialogTitle>{selected.name}</DialogTitle>
-                <DialogDescription>{selected.description}</DialogDescription>
-              </DialogHeader>
-              {loadingData ? (
-                <p className="text-sm text-muted-foreground py-4">Loading report data...</p>
-              ) : (
-                <ReportTable
-                  reportName={selected.name}
-                  columns={columns}
-                  data={tableData}
-                />
-              )}
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+          return (
+            <section
+              key={r.key}
+              className={`rounded-xl border border-border/60 bg-card/50 p-4 ${r.key === 'intelligence_summary' ? 'ring-1 ring-primary/40' : ''}`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <div className="h-8 w-8 rounded-md bg-primary/10 flex items-center justify-center shrink-0">
+                      <FileText className="h-4 w-4 text-primary" />
+                    </div>
+                    <h2 className="text-base font-semibold text-foreground">{r.name}</h2>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">{r.description}</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">Last generated: {r.lastGenerated ? new Date(r.lastGenerated).toLocaleString() : 'Never'}</p>
+                </div>
+
+                <div>
+                  {r.key !== 'intelligence_summary' ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-xs h-8"
+                      onClick={() => downloadExcel(r)}
+                    >
+                      <Download className="h-3 w-3 mr-1" /> Download Excel
+                    </Button>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground">Excel export not available</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-4">
+                {isLoading ? (
+                  <p className="text-sm text-muted-foreground py-4">Loading report data...</p>
+                ) : r.key === 'intelligence_summary' && loadingIntelligenceDoc ? (
+                  <p className="text-sm text-muted-foreground py-4">Building intelligence documentation...</p>
+                ) : r.key === 'intelligence_summary' && intelligenceDoc ? (
+                  <div className="space-y-4">
+                    <IntelligenceReportDocument data={intelligenceDoc} />
+                    <div className="rounded-lg border border-border/60 bg-background/35 p-3">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Detailed Metrics Appendix</p>
+                      <ReportTable
+                        reportName={r.name}
+                        columns={cols}
+                        data={data}
+                        disableExport
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <ReportTable
+                    reportName={r.name}
+                    columns={cols}
+                    data={data}
+                    disableExport={r.key === 'intelligence_summary'}
+                  />
+                )}
+              </div>
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }

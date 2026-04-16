@@ -33,13 +33,115 @@ const chartTooltipStyle = {
   cursor: { fill: 'rgba(100,160,255,0.08)' },
 };
 
+const OVERVIEW_INSIGHTS_CACHE_KEY = "overview_top_insights_v1";
+const AI_INSIGHTS_SHARED_CACHE_KEY = "ai-insights-cache-v1";
+
+function readOverviewInsightsCache(): InsightData[] {
+  try {
+    const raw = sessionStorage.getItem(OVERVIEW_INSIGHTS_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+function writeOverviewInsightsCache(items: InsightData[]) {
+  try {
+    sessionStorage.setItem(OVERVIEW_INSIGHTS_CACHE_KEY, JSON.stringify(items));
+  } catch {
+    // Ignore storage errors and keep runtime state only.
+  }
+}
+
+function readSharedAiInsightsCache(): InsightData[] {
+  try {
+    const raw = sessionStorage.getItem(AI_INSIGHTS_SHARED_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+function buildEmergencyInsightsFromRealtime(rows: MachineData[]): InsightData[] {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+
+  const sortedByReject = [...rows].sort((a, b) => Number(b?.rejection_count || 0) - Number(a?.rejection_count || 0));
+  const sortedByEfficiency = [...rows].sort((a, b) => Number(a?.efficiency_score || 0) - Number(b?.efficiency_score || 0));
+  const sortedByEnergy = [...rows].sort((a, b) => Number(b?.kWh || 0) - Number(a?.kWh || 0));
+
+  const topReject = sortedByReject[0];
+  const lowEfficiency = sortedByEfficiency[0];
+  const highEnergy = sortedByEnergy[0];
+
+  const fallback: InsightData[] = [];
+
+  if (topReject && Number(topReject.rejection_count || 0) > 0) {
+    fallback.push({
+      id: `ovw-reject-${topReject.id}`,
+      severity: "warning",
+      message: `${topReject.id} has highest rejects (${Number(topReject.rejection_count || 0)}) today`,
+      financial_impact: "Higher scrap and rework cost",
+      production_impact: "Reduced net good output",
+      confidence: 74,
+      suggested_action: `Run first-piece quality check and tool inspection on ${topReject.id}`,
+      machine: topReject.id,
+    });
+  }
+
+  if (lowEfficiency) {
+    fallback.push({
+      id: `ovw-eff-${lowEfficiency.id}`,
+      severity: Number(lowEfficiency.efficiency_score || 0) < 70 ? "critical" : "warning",
+      message: `${lowEfficiency.id} has lowest efficiency (${Number(lowEfficiency.efficiency_score || 0)}%)`,
+      financial_impact: "Higher cost per accepted part",
+      production_impact: "Lower throughput vs target",
+      confidence: 76,
+      suggested_action: `Review feed/speed and setup conditions on ${lowEfficiency.id}`,
+      machine: lowEfficiency.id,
+    });
+  }
+
+  if (highEnergy) {
+    fallback.push({
+      id: `ovw-energy-${highEnergy.id}`,
+      severity: "info",
+      message: `${highEnergy.id} is highest energy consumer (${Number(highEnergy.kWh || 0).toFixed(1)} kWh)`,
+      financial_impact: "Largest contributor to today's energy bill",
+      production_impact: "Energy intensity may impact cost competitiveness",
+      confidence: 72,
+      suggested_action: `Audit idle/runtime energy profile on ${highEnergy.id}`,
+      machine: highEnergy.id,
+    });
+  }
+
+  return fallback.slice(0, 4);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+
 export default function Overview() {
+  const cachedInsights = readOverviewInsightsCache();
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [loadCurve, setLoadCurve] = useState<{ time: string; value: number }[]>([]);
   const [prodTrend, setProdTrend] = useState<{ time: string; production: number; energy: number }[]>([]);
   const [carbonIntervals, setCarbonIntervals] = useState<any[]>([]);
   const [monthlyProduction, setMonthlyProduction] = useState<{ month: string; production: number }[]>([]);
-  const [topInsights, setTopInsights] = useState<InsightData[]>([]);
+  const [topInsights, setTopInsights] = useState<InsightData[]>(cachedInsights);
+  const [insightsLoading, setInsightsLoading] = useState(cachedInsights.length === 0);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
   const [kpis, setKpis] = useState({ maxDemand: 0, monthlyProduction: 0, avgEfficiency: 0 });
   const [dailyComparison, setDailyComparison] = useState<{
     energy: { percentChange: number };
@@ -47,6 +149,28 @@ export default function Overview() {
     cost: { percentChange: number };
     energyPerPart: { percentChange: number };
   } | null>(null);
+
+  const loadFallbackInsights = async () => {
+    const sharedAi = readSharedAiInsightsCache();
+    if (sharedAi.length > 0) {
+      setTopInsights(sharedAi.slice(0, 4));
+      writeOverviewInsightsCache(sharedAi.slice(0, 4));
+      setInsightsError(null);
+      return;
+    }
+
+    try {
+      const realtime = await withTimeout(apiClient.get("/metrics/realtime", { timeout: 10000 }), 11000, "overview realtime");
+      const rows = Array.isArray(realtime.data) ? realtime.data : [];
+      const fallback = buildEmergencyInsightsFromRealtime(rows);
+      setTopInsights(fallback);
+      if (fallback.length > 0) writeOverviewInsightsCache(fallback);
+      setInsightsError(fallback.length > 0 ? null : "AI insights are currently unavailable.");
+    } catch {
+      setTopInsights([]);
+      setInsightsError("AI insights are currently unavailable.");
+    }
+  };
 
   // Poll realtime machine state every 10 seconds
   useEffect(() => {
@@ -73,7 +197,24 @@ export default function Overview() {
   useEffect(() => {
     const fetchKpis = () => {
       apiClient.get("/production/monthly").then(r => setMonthlyProduction(r.data)).catch(() => {});
-      apiClient.get("/insights/top").then(r => setTopInsights(r.data)).catch(() => {});
+      withTimeout(apiClient.get("/insights/top", { timeout: 12000 }), 13000, "overview insights")
+        .then((r) => {
+          const data = Array.isArray(r.data) ? r.data : [];
+          if (data.length > 0) {
+            setTopInsights(data);
+            writeOverviewInsightsCache(data);
+            setInsightsError(null);
+            return;
+          }
+
+          loadFallbackInsights();
+        })
+        .catch(() => {
+          loadFallbackInsights();
+        })
+        .finally(() => {
+          setInsightsLoading(false);
+        });
       apiClient.get("/metrics/kpis").then(r => setKpis(r.data)).catch(() => {});
       apiClient.get("/metrics/daily-comparison").then(r => setDailyComparison(r.data)).catch(() => {});
     };
@@ -246,9 +387,17 @@ export default function Overview() {
         <div className="chart-container">
           <h3 className="text-sm font-medium text-foreground mb-4">🧠 AI Insights</h3>
           <div className="space-y-2 max-h-56 overflow-auto">
-            {topInsights.map(i => (
-              <InsightCard key={i.id} insight={i} compact />
-            ))}
+            {insightsLoading ? (
+              <p className="text-xs text-muted-foreground">Loading insights...</p>
+            ) : insightsError ? (
+              <p className="text-xs text-muted-foreground">{insightsError}</p>
+            ) : topInsights.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No insights available right now.</p>
+            ) : (
+              topInsights.map(i => (
+                <InsightCard key={i.id} insight={i} compact />
+              ))
+            )}
           </div>
         </div>
       </div>

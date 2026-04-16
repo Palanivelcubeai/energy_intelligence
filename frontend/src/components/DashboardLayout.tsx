@@ -4,8 +4,9 @@ import { Sun, Moon, LogOut, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { usePlantConfig } from "@/context/PlantConfigContext";
+import { GlobalChatAssist } from "@/components/GlobalChatAssist";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -22,6 +23,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { plantName } = usePlantConfig();
   const { name, role, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
@@ -38,6 +40,8 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
     logout();
     navigate("/login", { replace: true });
   };
+
+  const showGlobalChatAssist = location.pathname !== "/ai-insights";
 
   return (
     <SidebarProvider>
@@ -90,6 +94,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
           <main className="flex-1 overflow-auto p-4 md:p-6">
             {children}
           </main>
+          {showGlobalChatAssist && <GlobalChatAssist />}
         </div>
       </div>
     </SidebarProvider>

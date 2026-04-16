@@ -51,7 +51,7 @@ export default function Admin() {
     } catch {
       toast({ title: "Error", description: "Failed to load users", variant: "destructive" });
     }
-  }, [toast]);
+  }, [toast, loggedInEmail]);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
 
@@ -336,6 +336,7 @@ export default function Admin() {
           ))}
         </div>
       </div>
+
     </div>
   );
 }

@@ -364,4 +364,66 @@ router.get("/daily-comparison", async (_req, res) => {
   }
 });
 
+// GET /api/metrics/data-quality — ingestion freshness and completeness health
+router.get("/data-quality", async (_req, res) => {
+  try {
+    const [lastIngestResult, missingResult, totalsResult, staleResult] = await Promise.all([
+      pool.query(
+        `SELECT MAX(recorded_at) AS last_ingestion
+         FROM machine_metrics`
+      ),
+      pool.query(
+        `SELECT m.id
+         FROM machines m
+         LEFT JOIN (
+           SELECT machine_id, MAX(recorded_at) AS last_seen
+           FROM machine_metrics
+           WHERE recorded_at >= NOW() - INTERVAL '10 minutes'
+           GROUP BY machine_id
+         ) mm ON mm.machine_id = m.id
+         WHERE mm.last_seen IS NULL
+         ORDER BY m.id`
+      ),
+      pool.query(
+        `SELECT
+           COUNT(*)::int AS total_rows,
+           COALESCE(SUM(CASE WHEN kw IS NULL OR kwh IS NULL OR parts_produced IS NULL OR efficiency_score IS NULL THEN 1 ELSE 0 END), 0)::int AS invalid_rows
+         FROM machine_metrics
+         WHERE recorded_at >= NOW() - INTERVAL '24 hours'`
+      ),
+      pool.query(
+        `SELECT machine_id, MAX(recorded_at) AS last_seen
+         FROM machine_metrics
+         GROUP BY machine_id`
+      ),
+    ]);
+
+    const lastIngestion = lastIngestResult.rows[0]?.last_ingestion || null;
+    const totalRows = Number.parseInt(totalsResult.rows[0]?.total_rows, 10) || 0;
+    const invalidRows = Number.parseInt(totalsResult.rows[0]?.invalid_rows, 10) || 0;
+    const invalidRatePct = totalRows > 0 ? Math.round((invalidRows / totalRows) * 1000) / 10 : 0;
+
+    const staleMachines = staleResult.rows
+      .filter((r) => {
+        if (!r.last_seen) return true;
+        const delta = Date.now() - new Date(r.last_seen).getTime();
+        return Number.isFinite(delta) ? delta > 10 * 60 * 1000 : true;
+      })
+      .map((r) => r.machine_id);
+
+    res.json({
+      last_ingestion: lastIngestion,
+      missing_machines: missingResult.rows.map((r) => r.id),
+      stale_machines: staleMachines,
+      invalid_rate_pct: invalidRatePct,
+      total_rows_24h: totalRows,
+      invalid_rows_24h: invalidRows,
+      status: !lastIngestion || staleMachines.length > 0 || invalidRatePct > 10 ? "warning" : "healthy",
+    });
+  } catch (err) {
+    console.error("GET /metrics/data-quality error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 module.exports = router;

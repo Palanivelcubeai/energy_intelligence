@@ -20,11 +20,12 @@ interface ReportTableProps {
   reportName: string;
   columns: Column[];
   data: Record<string, unknown>[];
+  disableExport?: boolean;
 }
 
 const PAGE_SIZE = 10;
 
-export default function ReportTable({ reportName, columns, data }: ReportTableProps) {
+export default function ReportTable({ reportName, columns, data, disableExport = false }: ReportTableProps) {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -93,9 +94,13 @@ export default function ReportTable({ reportName, columns, data }: ReportTablePr
             className="pl-9 h-9"
           />
         </div>
-        <Button size="sm" onClick={exportExcel} className="gap-1.5">
-          <Download className="h-3.5 w-3.5" /> Download Excel
-        </Button>
+        {!disableExport ? (
+          <Button size="sm" onClick={exportExcel} className="gap-1.5">
+            <Download className="h-3.5 w-3.5" /> Download Excel
+          </Button>
+        ) : (
+          <span className="text-xs text-muted-foreground">Excel export disabled</span>
+        )}
       </div>
 
       <div className="rounded-md border">

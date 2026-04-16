@@ -6,6 +6,7 @@ const severityRank = { critical: 4, warning: 3, info: 2, success: 1 };
 // Small in-memory cache to avoid regenerating AI insights on every page refresh.
 const insightsCache = new Map();
 const inflightInsights = new Map();
+let feedbackTableReady = false;
 
 function getCacheTtlMs() {
   return Math.max(5000, toNum(process.env.INSIGHTS_CACHE_TTL_MS, 45000));
@@ -22,6 +23,26 @@ function getHttpTimeoutMs() {
 function toNum(value, fallback = 0) {
   const n = parseFloat(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+async function ensureInsightFeedbackTable() {
+  if (feedbackTableReady) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS insight_feedback (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      insight_key VARCHAR(255) NOT NULL,
+      machine_id VARCHAR(20),
+      vote SMALLINT NOT NULL CHECK (vote IN (-1, 1)),
+      user_email VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (insight_key, user_email)
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_insight_feedback_time ON insight_feedback (created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_insight_feedback_key ON insight_feedback (insight_key)");
+
+  feedbackTableReady = true;
 }
 
 function getInsightsNumPredict() {
@@ -1320,22 +1341,40 @@ async function generateInsightsFastEndpoint(limit) {
   }
 }
 
+async function runWithTimeout(taskPromise, timeoutMs, label) {
+  return Promise.race([
+    taskPromise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs);
+    }),
+  ]);
+}
+
 // GET /api/insights/all
 router.get("/all", async (_req, res) => {
+  const fastMs = Math.max(5000, toNum(process.env.INSIGHTS_ROUTE_FAST_TIMEOUT_MS, 9000));
+  const retryMs = Math.max(7000, toNum(process.env.INSIGHTS_ROUTE_RETRY_TIMEOUT_MS, 12000));
+  const simpleMs = Math.max(5000, toNum(process.env.INSIGHTS_ROUTE_SIMPLE_TIMEOUT_MS, 9000));
+
   try {
-    const insights = await generateInsightsFastEndpoint();
+    const insights = await runWithTimeout(generateInsightsFastEndpoint(), fastMs, "insights fast");
     res.json(insights);
   } catch (err) {
     try {
-      const retryInsights = await generateInsights();
+      const retryInsights = await runWithTimeout(generateInsights(), retryMs, "insights retry");
       return res.json(retryInsights);
     } catch (retryErr) {
       try {
-        const simple = await generateSimpleAiInsights(4);
+        const simple = await runWithTimeout(generateSimpleAiInsights(4), simpleMs, "insights simple");
         return res.json(simple);
       } catch (simpleErr) {
-        console.warn("GET /insights/all fallback failed:", simpleErr?.message || retryErr?.message || retryErr);
-        return res.json([]);
+        try {
+          const ruleBased = await generateRuleBasedInsights(4);
+          return res.json(ruleBased);
+        } catch (ruleErr) {
+          console.warn("GET /insights/all fallback failed:", ruleErr?.message || simpleErr?.message || retryErr?.message || retryErr);
+          return res.json([]);
+        }
       }
     }
   }
@@ -1343,22 +1382,99 @@ router.get("/all", async (_req, res) => {
 
 // GET /api/insights/top — top 4 most recent
 router.get("/top", async (_req, res) => {
+  const fastMs = Math.max(5000, toNum(process.env.INSIGHTS_ROUTE_FAST_TIMEOUT_MS, 9000));
+  const retryMs = Math.max(7000, toNum(process.env.INSIGHTS_ROUTE_RETRY_TIMEOUT_MS, 12000));
+  const simpleMs = Math.max(5000, toNum(process.env.INSIGHTS_ROUTE_SIMPLE_TIMEOUT_MS, 9000));
+
   try {
-    const insights = await generateInsightsFastEndpoint(4);
+    const insights = await runWithTimeout(generateInsightsFastEndpoint(4), fastMs, "insights top fast");
     res.json(insights);
   } catch (err) {
     try {
-      const retryInsights = await generateInsights(4);
+      const retryInsights = await runWithTimeout(generateInsights(4), retryMs, "insights top retry");
       return res.json(retryInsights);
     } catch (retryErr) {
       try {
-        const simple = await generateSimpleAiInsights(4);
+        const simple = await runWithTimeout(generateSimpleAiInsights(4), simpleMs, "insights top simple");
         return res.json(simple);
       } catch (simpleErr) {
-        console.warn("GET /insights/top fallback failed:", simpleErr?.message || retryErr?.message || retryErr);
-        return res.json([]);
+        try {
+          const ruleBased = await generateRuleBasedInsights(4);
+          return res.json(ruleBased);
+        } catch (ruleErr) {
+          console.warn("GET /insights/top fallback failed:", ruleErr?.message || simpleErr?.message || retryErr?.message || retryErr);
+          return res.json([]);
+        }
       }
     }
+  }
+});
+
+// POST /api/insights/feedback
+router.post("/feedback", async (req, res) => {
+  try {
+    await ensureInsightFeedbackTable();
+
+    const insightKey = String(req.body?.insightKey || req.body?.insight_id || "").trim();
+    const machineId = req.body?.machine ? String(req.body.machine).trim() : null;
+    const userEmail = req.body?.user_email ? String(req.body.user_email).trim().toLowerCase() : null;
+    const voteRaw = Number.parseInt(String(req.body?.vote), 10);
+    const vote = voteRaw >= 1 ? 1 : voteRaw <= -1 ? -1 : 0;
+
+    if (!insightKey) {
+      return res.status(400).json({ error: "insightKey is required" });
+    }
+    if (![1, -1].includes(vote)) {
+      return res.status(400).json({ error: "vote must be 1 or -1" });
+    }
+
+    if (userEmail) {
+      await pool.query(
+        `INSERT INTO insight_feedback (insight_key, machine_id, vote, user_email)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (insight_key, user_email)
+         DO UPDATE SET vote = EXCLUDED.vote, machine_id = EXCLUDED.machine_id, created_at = NOW()`,
+        [insightKey, machineId, vote, userEmail]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO insight_feedback (insight_key, machine_id, vote, user_email)
+         VALUES ($1, $2, $3, NULL)`,
+        [insightKey, machineId, vote]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("POST /insights/feedback error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/insights/feedback/summary
+router.get("/feedback/summary", async (_req, res) => {
+  try {
+    await ensureInsightFeedbackTable();
+
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*)::int AS total_feedback,
+         COALESCE(SUM(CASE WHEN vote = 1 THEN 1 ELSE 0 END), 0)::int AS accepted_feedback,
+         COALESCE(SUM(CASE WHEN vote = -1 THEN 1 ELSE 0 END), 0)::int AS rejected_feedback,
+         COALESCE(ROUND((SUM(CASE WHEN vote = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100, 1), 0) AS accepted_rate
+       FROM insight_feedback
+       WHERE created_at >= NOW() - INTERVAL '30 days'`
+    );
+
+    res.json(rows[0] || {
+      total_feedback: 0,
+      accepted_feedback: 0,
+      rejected_feedback: 0,
+      accepted_rate: 0,
+    });
+  } catch (err) {
+    console.error("GET /insights/feedback/summary error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 

@@ -11,84 +11,21 @@ function extractMachineId(text) {
   return match ? `CNC-${match[1]}` : null;
 }
 
+function extractMachineIds(text) {
+  const matches = String(text || "").toUpperCase().match(/\bCNC[-\s]?(\d+)\b/g) || [];
+  const normalized = matches.map((token) => {
+    const m = token.match(/(\d+)/);
+    return m ? `CNC-${m[1]}` : token.replace(/\s+/, "-");
+  });
+  return [...new Set(normalized)];
+}
+
 function hasAny(text, words) {
   return words.some((w) => text.includes(w));
 }
 
 function detectIntent(message) {
-  const q = String(message || "").toLowerCase();
-  const machineId = extractMachineId(message);
-
-  const asksTop = hasAny(q, ["highest", "top", "most", "max"]);
-  const asksLow = hasAny(q, ["lowest", "least", "minimum", "min", "worst"]);
-  const asksAverage = hasAny(q, ["average", "avg", "mean"]);
-  const asksTotal = hasAny(q, ["total", "overall", "sum", "consumption"]);
-
-  const aboutProduction = hasAny(q, ["parts", "production", "output", "throughput"]);
-  const aboutEnergy = hasAny(q, ["energy", "kwh", "power"]);
-  const aboutReject = hasAny(q, ["reject", "scrap", "quality"]);
-  const aboutEfficiency = hasAny(q, ["efficiency", "oee", "performance"]);
-  const aboutPf = hasAny(q, ["power factor", "pf"]);
-  const aboutStatus = hasAny(q, ["status", "running", "idle", "maintenance"]);
-  const asksIssue = /issue|issues|problem|fault|alert|anomaly|what\s+wrong/.test(q);
-  const asksHelp = hasAny(q, ["help", "what can i ask", "example", "examples"]);
-
-  if (asksHelp) {
-    return "help";
-  }
-  if (asksIssue && machineId) {
-    return "machine_issues";
-  }
-  if (asksIssue) {
-    return "plant_issues";
-  }
-  if (asksTotal && aboutProduction) {
-    return "production_total";
-  }
-  if (asksTotal && aboutEnergy) {
-    return "energy_total";
-  }
-  if (asksTotal && aboutReject) {
-    return "reject_total";
-  }
-  if (asksAverage && aboutEfficiency) {
-    return "efficiency_average";
-  }
-  if (asksAverage && aboutPf) {
-    return "pf_average";
-  }
-  if (asksTop && aboutProduction) {
-    return "top_production_machine";
-  }
-  if (asksTop && aboutEnergy) {
-    return "top_energy_machine";
-  }
-  if (asksTop && aboutReject) {
-    return "top_reject_machine";
-  }
-  if (asksLow && aboutEfficiency) {
-    return "low_efficiency_machine";
-  }
-  if (machineId && (aboutProduction || aboutEnergy || aboutReject || aboutEfficiency || aboutPf || aboutStatus)) {
-    return "machine_summary";
-  }
-  if (aboutStatus) {
-    return "status_overview";
-  }
-
-  if (aboutReject) {
-    return "reject_analysis";
-  }
-  if (aboutProduction) {
-    return "production_details";
-  }
-  if (aboutEnergy) {
-    return "energy_details";
-  }
-  if (aboutEfficiency) {
-    return "efficiency_details";
-  }
-  return "plant_summary";
+  return "natural_chat";
 }
 
 function collectMachineIssues(machine) {
@@ -279,11 +216,71 @@ function buildDeterministicAnswer(question, intent, evidence, machineId) {
     }
   }
 
+  if (intent === "worst_machine") {
+    if (evidence.issueMachine) {
+      const issues = collectMachineIssues(evidence.issueMachine).map((x) => x.text);
+      if (issues.length > 0) {
+        lines.push(`Right now the worst performing machine is ${evidence.issueMachine.id} based on current risk signals: ${issues.join(", ")}.`);
+      } else if (evidence.lowEfficiency) {
+        lines.push(`No major alarms are active, but lowest efficiency right now is ${evidence.lowEfficiency.id} at ${evidence.lowEfficiency.avg_efficiency}% efficiency.`);
+      }
+    } else if (evidence.lowEfficiency) {
+      lines.push(`Current lowest efficiency machine is ${evidence.lowEfficiency.id} at ${evidence.lowEfficiency.avg_efficiency}%.`);
+    }
+  }
+
+  if (intent === "compare_machines") {
+    const a = evidence.compareMachines?.a;
+    const b = evidence.compareMachines?.b;
+    if (a && b) {
+      lines.push(
+        `Comparison ${a.id} vs ${b.id}: production ${a.parts_today} vs ${b.parts_today} parts, energy ${a.kwh_today} vs ${b.kwh_today} kWh, rejects ${formatPct(a.reject_rate_pct)}% vs ${formatPct(b.reject_rate_pct)}%, efficiency ${a.avg_efficiency}% vs ${b.avg_efficiency}%.`
+      );
+      const better = a.avg_efficiency >= b.avg_efficiency ? a.id : b.id;
+      const riskier = a.reject_rate_pct >= b.reject_rate_pct ? a.id : b.id;
+      lines.push(`${better} is stronger on efficiency, while ${riskier} has higher quality risk right now.`);
+    } else {
+      lines.push("I can compare machines directly if you mention both IDs, for example: compare CNC-2 and CNC-3.");
+    }
+  }
+
+  if (intent === "why_machine_bad") {
+    const machine = evidence.machine;
+    if (machine) {
+      const issues = collectMachineIssues(machine).map((x) => x.text);
+      if (issues.length > 0) {
+        lines.push(`${machine.id} is underperforming mainly due to ${issues.join(", ")}.`);
+      } else {
+        lines.push(`${machine.id} has no major alarm flags right now, but it may still be relatively weaker than peers on current shift performance.`);
+      }
+    }
+  }
+
+  if (intent === "shift_priority_action") {
+    if (evidence.issueMachine) {
+      lines.push(`First priority this shift: stabilize ${evidence.issueMachine.id}, because it currently carries the highest operational risk.`);
+      const issues = collectMachineIssues(evidence.issueMachine).map((x) => x.text);
+      if (issues.length > 0) {
+        lines.push(`Immediate focus areas: ${issues.join(", ")}.`);
+      }
+    } else if (evidence.lowEfficiency) {
+      lines.push(`First priority this shift: recover efficiency on ${evidence.lowEfficiency.id}, currently lowest at ${evidence.lowEfficiency.avg_efficiency}%.`);
+    }
+  }
+
   if (lines.length === 0) {
-    if (intent === "help") {
+    if (intent === "greeting") {
+      lines.push("Hi. I can help with live plant metrics. Ask about production, energy, rejects, efficiency, PF, machine status, or machine issues.");
+    } else if (intent === "smalltalk_status") {
+      lines.push("I am doing well and ready to help with live plant data. You can ask anything about production, energy, rejects, efficiency, or machine health.");
+    } else if (intent === "smalltalk_thanks") {
+      lines.push("You're welcome. I can continue with any realtime production or energy question you have.");
+    } else if (intent === "smalltalk_bye") {
+      lines.push("Got it. I will be here whenever you want another realtime plant update.");
+    } else if (intent === "help") {
       lines.push("You can ask: total production today, total energy consumption today, total rejects today, highest energy machine, lowest efficiency machine, machine issues in CNC-2, or current status.");
     } else {
-      lines.push("I found current plant metrics, but your question is broad. Ask for production, reject, energy, efficiency, PF, or status by machine.");
+      lines.push("I have live plant data and can answer naturally. If you want, ask about worst machine, machine issues, totals, efficiency, energy, rejects, or status and I will break it down clearly.");
     }
   }
 
@@ -296,26 +293,69 @@ function buildDeterministicAnswer(question, intent, evidence, machineId) {
   return lines.join(" ");
 }
 
-async function polishWithOllama(question, intent, evidence, fallbackAnswer, fallbackSuggestions) {
+function buildNaturalFallbackAnswer(question, evidence, machineId) {
+  const q = String(question || "").toLowerCase();
+
+  if (/\b(how are you|how r you|how're you|how you doing|how is it going)\b/.test(q)) {
+    const focusMachine = evidence.issueMachine?.id || evidence.lowEfficiency?.id || "the current bottleneck machine";
+    return `I am doing well and ready with your live plant data. Right now, focus first on ${focusMachine}; plant today is ${evidence.totals?.parts_today_total || 0} parts, ${evidence.totals?.kwh_today_total || 0} kWh, ${evidence.totals?.rejects_total || 0} rejects.`;
+  }
+
+  if (/\b(thanks|thank you|thx)\b/.test(q)) {
+    return "You're welcome. I am ready to continue with realtime production, energy, quality, or machine performance questions.";
+  }
+
+  if (machineId && evidence.machine) {
+    return `${machineId} right now: ${evidence.machine.parts_today} parts, ${formatPct(evidence.machine.reject_rate_pct)}% reject rate, ${evidence.machine.kwh_today} kWh, ${evidence.machine.avg_efficiency}% efficiency, status ${String(evidence.machine.status || "unknown").toLowerCase()}.`;
+  }
+
+  const worst = evidence.issueMachine?.id || evidence.lowEfficiency?.id || "N/A";
+  const topEnergy = evidence.topEnergy?.id || "N/A";
+  return `From live data right now: ${evidence.totals?.parts_today_total || 0} parts produced, ${evidence.totals?.kwh_today_total || 0} kWh consumed, ${evidence.totals?.rejects_total || 0} rejects, average efficiency ${formatPct(evidence.totals?.avg_efficiency_plant || 0)}%. Current highest-risk machine is ${worst}; highest energy consumer is ${topEnergy}.`;
+}
+
+function normalizeHistory(history) {
+  if (!Array.isArray(history)) return [];
+  return history
+    .map((item) => {
+      const role = item?.role === "assistant" ? "assistant" : item?.role === "user" ? "user" : null;
+      const content = typeof item?.text === "string" ? item.text.trim() : "";
+      if (!role || !content) return null;
+      return { role, content };
+    })
+    .filter(Boolean)
+    .slice(-12);
+}
+
+async function polishWithOllama(question, evidence, fallbackAnswer, fallbackSuggestions, history = []) {
   const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
   const model = process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b";
 
   const systemPrompt = [
-    "You are a concise industrial assistant.",
+    "You are a realtime industrial copilot for CNC operations.",
+    "Respond naturally like a modern chat assistant.",
     "Use only the provided evidence. Do not invent numbers.",
     "Return ONLY valid JSON object.",
     "Schema: {\"answer\":string,\"suggestions\":string[]}",
-    "Answer in max 3 short sentences.",
-    "Suggestions must be practical and action-oriented.",
+    "Answer in natural conversational tone and include useful context from evidence.",
+    "Do not ask user to rephrase into short/specific format.",
+    "Suggestions must be practical and action-oriented and concise.",
   ].join(" ");
 
   const userPrompt = [
-    `Question: ${question}`,
-    `Intent: ${intent}`,
+    `Current user message: ${question}`,
     `Evidence: ${JSON.stringify(evidence)}`,
     `Fallback answer: ${fallbackAnswer}`,
     `Fallback suggestions: ${JSON.stringify(fallbackSuggestions)}`,
+    "Use chat history context when relevant, but prioritize latest user message.",
   ].join("\n");
+
+  const normalizedHistory = normalizeHistory(history);
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...normalizedHistory,
+    { role: "user", content: userPrompt },
+  ];
 
   const controller = new AbortController();
   const timeoutMs = Math.max(5000, toNum(process.env.CHAT_ASSIST_TIMEOUT_MS, 12000));
@@ -330,13 +370,10 @@ async function polishWithOllama(question, intent, evidence, fallbackAnswer, fall
         stream: false,
         format: "json",
         options: {
-          temperature: 0.2,
-          num_predict: 180,
+          temperature: 0.4,
+          num_predict: 260,
         },
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
+        messages,
       }),
       signal: controller.signal,
     });
@@ -368,6 +405,190 @@ async function polishWithOllama(question, intent, evidence, fallbackAnswer, fall
   }
 }
 
+async function streamAnswerWithOllama(question, evidence, fallbackAnswer, history = [], onToken) {
+  const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
+  const model = process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b";
+
+  const systemPrompt = [
+    "You are a realtime industrial copilot for CNC operations.",
+    "Respond naturally like a modern chat assistant.",
+    "Use only the provided evidence. Do not invent numbers.",
+    "Answer in natural conversational tone and include useful context from evidence.",
+    "Do not ask user to rephrase into short/specific format.",
+  ].join(" ");
+
+  const userPrompt = [
+    `Current user message: ${question}`,
+    `Evidence: ${JSON.stringify(evidence)}`,
+    `Fallback answer: ${fallbackAnswer}`,
+    "Use chat history context when relevant, but prioritize latest user message.",
+  ].join("\n");
+
+  const normalizedHistory = normalizeHistory(history);
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...normalizedHistory,
+    { role: "user", content: userPrompt },
+  ];
+
+  const controller = new AbortController();
+  const timeoutMs = Math.max(5000, toNum(process.env.CHAT_ASSIST_TIMEOUT_MS, 12000));
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${ollamaUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        options: {
+          temperature: 0.4,
+          num_predict: 260,
+        },
+        messages,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      return fallbackAnswer;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let full = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        let parsed;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+
+        const token = parsed?.message?.content || "";
+        if (token) {
+          full += token;
+          onToken(token);
+        }
+      }
+    }
+
+    const finalAnswer = full.trim();
+    return finalAnswer || fallbackAnswer;
+  } catch {
+    return fallbackAnswer;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function buildChatContext(message) {
+  const machineId = extractMachineId(message);
+  const machineIds = extractMachineIds(message);
+  const intent = "natural_chat";
+  const snapshot = await getMachineTodaySnapshot(machineId);
+  const allSnapshot = machineId ? await getMachineTodaySnapshot(null) : snapshot;
+
+  const topProduction = [...allSnapshot].sort((a, b) => b.parts_today - a.parts_today)[0] || null;
+  const topReject = [...allSnapshot].sort((a, b) => b.reject_rate_pct - a.reject_rate_pct)[0] || null;
+  const topEnergy = [...allSnapshot].sort((a, b) => b.kwh_today - a.kwh_today)[0] || null;
+  const lowEfficiency = [...allSnapshot].sort((a, b) => a.avg_efficiency - b.avg_efficiency)[0] || null;
+
+  const statusCounts = allSnapshot.reduce(
+    (acc, row) => {
+      const key = String(row.status || "").toLowerCase();
+      if (key === "running") acc.running += 1;
+      else if (key === "idle") acc.idle += 1;
+      else acc.maintenance += 1;
+      return acc;
+    },
+    { running: 0, idle: 0, maintenance: 0 }
+  );
+
+  const selectedMachine = machineId ? snapshot[0] || null : null;
+  const compareMachines = machineIds.length >= 2
+    ? {
+        a: allSnapshot.find((m) => m.id === machineIds[0]) || null,
+        b: allSnapshot.find((m) => m.id === machineIds[1]) || null,
+      }
+    : null;
+  const issueMachine = allSnapshot
+    .map((m) => ({
+      ...m,
+      _issueScore: collectMachineIssues(m).reduce((s, x) => s + x.weight, 0),
+    }))
+    .sort((a, b) => {
+      if (b._issueScore !== a._issueScore) return b._issueScore - a._issueScore;
+      return toNum(b.reject_rate_pct, 0) - toNum(a.reject_rate_pct, 0);
+    })[0] || null;
+
+  const totals = allSnapshot.reduce(
+    (acc, row) => {
+      acc.parts_today_total += toNum(row.parts_today, 0);
+      acc.rejects_total += toNum(row.rejects_today, 0);
+      acc.kwh_today_total += toNum(row.kwh_today, 0);
+      acc.eff_sum += toNum(row.avg_efficiency, 0);
+      acc.pf_sum += toNum(row.avg_pf, 0);
+      acc.machine_count += 1;
+      return acc;
+    },
+    { parts_today_total: 0, rejects_total: 0, kwh_today_total: 0, eff_sum: 0, pf_sum: 0, machine_count: 0 }
+  );
+  totals.kwh_today_total = Math.round(totals.kwh_today_total * 100) / 100;
+  totals.reject_rate_pct = totals.parts_today_total > 0
+    ? Math.round((totals.rejects_total / totals.parts_today_total) * 1000) / 10
+    : 0;
+  totals.avg_efficiency_plant = totals.machine_count > 0
+    ? Math.round((totals.eff_sum / totals.machine_count) * 10) / 10
+    : 0;
+  totals.avg_pf_plant = totals.machine_count > 0
+    ? Math.round((totals.pf_sum / totals.machine_count) * 100) / 100
+    : 0;
+
+  const evidence = {
+    machine: selectedMachine,
+    compareMachines,
+    issueMachine,
+    totals,
+    topProduction,
+    topReject,
+    topEnergy,
+    lowEfficiency,
+    statusCounts,
+    date: new Date().toISOString().slice(0, 10),
+  };
+
+  const fallbackSuggestions = [
+    topReject ? `Prioritize reject reduction on ${topReject.id} this shift.` : "Review quality risk by machine this shift.",
+    topEnergy ? `Audit idle and cycle energy on ${topEnergy.id}.` : "Review machine-wise energy distribution.",
+    lowEfficiency ? `Run setup recovery actions on ${lowEfficiency.id}.` : "Track efficiency drift by machine every hour.",
+    "Ask me to compare any two machines for a direct side-by-side view.",
+  ].filter(Boolean).slice(0, 4);
+
+  const fallbackAnswer = buildNaturalFallbackAnswer(message, evidence, machineId);
+
+  return {
+    intent,
+    evidence,
+    fallbackSuggestions,
+    fallbackAnswer,
+  };
+}
+
 router.post("/ask", async (req, res) => {
   try {
     const message = String(req.body?.message || "").trim();
@@ -376,11 +597,9 @@ router.post("/ask", async (req, res) => {
     }
 
     const machineId = extractMachineId(message);
-    const baseIntent = detectIntent(message);
-    const asksIssue = /issue|issues|problem|fault|alert|anomaly|what\s+wrong/.test(message.toLowerCase());
-    const intent = asksIssue && machineId
-      ? "machine_issues"
-      : (machineId && baseIntent === "plant_summary" ? "machine_issues" : baseIntent);
+    const machineIds = extractMachineIds(message);
+    const history = req.body?.history;
+    const intent = "natural_chat";
     const snapshot = await getMachineTodaySnapshot(machineId);
     const allSnapshot = machineId ? await getMachineTodaySnapshot(null) : snapshot;
 
@@ -401,6 +620,12 @@ router.post("/ask", async (req, res) => {
     );
 
     const selectedMachine = machineId ? snapshot[0] || null : null;
+    const compareMachines = machineIds.length >= 2
+      ? {
+          a: allSnapshot.find((m) => m.id === machineIds[0]) || null,
+          b: allSnapshot.find((m) => m.id === machineIds[1]) || null,
+        }
+      : null;
     const issueMachine = allSnapshot
       .map((m) => ({
         ...m,
@@ -436,6 +661,7 @@ router.post("/ask", async (req, res) => {
 
     const evidence = {
       machine: selectedMachine,
+      compareMachines,
       issueMachine,
       totals,
       topProduction,
@@ -446,116 +672,18 @@ router.post("/ask", async (req, res) => {
       date: new Date().toISOString().slice(0, 10),
     };
 
-    const fallbackSuggestions = intent === "production_total"
-      ? [
-          topProduction ? `Top producer ${topProduction.id} can share best settings across lines.` : "Review top producer setup and cycle profile.",
-          lowEfficiency ? `Improve output by tuning ${lowEfficiency.id} efficiency this shift.` : "Tune low-performing machines to raise total output.",
-          topReject ? `Reduce total loss by fixing rejects on ${topReject.id} first.` : "Track reject trend to protect total throughput.",
-        ].filter(Boolean)
-      : intent === "energy_total"
-        ? [
-            topEnergy ? `Reduce idle energy first on ${topEnergy.id} this shift.` : "Audit top energy consumer machine first.",
-            `Compare kWh/part by machine and optimize worst performer.`,
-            `Schedule non-critical loads to off-peak periods where possible.`,
-          ]
-      : intent === "reject_total"
-        ? [
-            topReject ? `Prioritize reject reduction on ${topReject.id} immediately.` : "Investigate top reject contributor first.",
-            `Run first-piece validation on all active lines this shift.`,
-            `Tighten process parameter checks for high-variance machines.`,
-          ]
-      : intent === "efficiency_average" || intent === "low_efficiency_machine"
-        ? [
-            lowEfficiency ? `Run setup and cycle-time recovery actions on ${lowEfficiency.id}.` : "Investigate lowest efficiency machine first.",
-            `Track shift-wise efficiency drift and enforce setup checklist.`,
-            `Review downtime causes and micro-stoppages this shift.`,
-          ]
-      : intent === "pf_average"
-        ? [
-            `Check machines below PF 0.9 and prioritize correction.`,
-            `Inspect capacitor bank and load balancing for low-PF lines.`,
-            `Monitor PF trend hourly to avoid demand penalties.`,
-          ]
-      : intent === "top_production_machine"
-        ? [
-            topProduction ? `Replicate ${topProduction.id} best parameters across comparable lines.` : "Capture best-performing machine settings for reuse.",
-            `Use top producer settings as first-piece baseline.`,
-            `Protect top producer uptime with preventive checks.`,
-          ]
-      : intent === "top_energy_machine"
-        ? [
-            topEnergy ? `Audit idle/load consumption pattern on ${topEnergy.id}.` : "Audit highest energy machine first.",
-            `Optimize warm-up and standby windows on high-load machine.`,
-            `Compare energy per part across machines and close the gap.`,
-          ]
-      : intent === "top_reject_machine"
-        ? [
-            topReject ? `Start root-cause review on ${topReject.id} reject sources.` : "Start reject root-cause review on top contributor.",
-            `Tighten first-off approval and in-process quality checks.`,
-            `Inspect tooling wear and alignment on reject-heavy operation.`,
-          ]
-      : intent === "status_overview"
-        ? [
-            `Move prolonged idle machines to planned tasks or shutdown.`,
-            `Prioritize maintenance clearance for blocked machines.`,
-            `Rebalance workload from constrained lines to running lines.`,
-          ]
-      : intent === "machine_issues" && selectedMachine
-        ? [
-            `Prioritize ${selectedMachine.id} corrective checks this shift.`,
-            `Inspect tool wear, feed settings, and quality checks on ${selectedMachine.id}.`,
-            `Monitor ${selectedMachine.id} efficiency, reject rate, and PF every hour today.`,
-          ]
-      : intent === "plant_issues" && issueMachine
-        ? [
-            `Prioritize ${issueMachine.id} corrective checks this shift.`,
-            `Start root-cause validation on ${issueMachine.id} before next run batch.`,
-            `Track ${issueMachine.id} reject, PF, and efficiency each hour today.`,
-          ]
-      : intent === "machine_summary" && selectedMachine
-        ? [
-            `Track ${selectedMachine.id} reject rate and efficiency every hour.`,
-            `Verify ${selectedMachine.id} setup, tool condition, and feed/speed consistency.`,
-            `Reduce idle and standby windows on ${selectedMachine.id}.`,
-          ]
-      : intent === "help"
-        ? [
-            `Try: total production today`,
-            `Try: total energy consumption today`,
-            `Try: issues in CNC-2`,
-          ]
-      : [
-          topReject ? `Prioritize reject reduction on ${topReject.id} this shift.` : "Review quality metrics for top reject machine.",
-          topEnergy ? `Audit idle power and cycle energy on ${topEnergy.id}.` : "Review machine energy distribution.",
-          lowEfficiency ? `Run quick setup check on ${lowEfficiency.id} to recover efficiency.` : "Check efficiency trend vs baseline.",
-        ].filter(Boolean);
+    const fallbackSuggestions = [
+      topReject ? `Prioritize reject reduction on ${topReject.id} this shift.` : "Review quality risk by machine this shift.",
+      topEnergy ? `Audit idle and cycle energy on ${topEnergy.id}.` : "Review machine-wise energy distribution.",
+      lowEfficiency ? `Run setup recovery actions on ${lowEfficiency.id}.` : "Track efficiency drift by machine every hour.",
+      "Ask me to compare any two machines for a direct side-by-side view.",
+    ].filter(Boolean).slice(0, 4);
 
-    const fallbackAnswer = buildDeterministicAnswer(message, intent, evidence, machineId);
+    const fallbackAnswer = buildNaturalFallbackAnswer(message, evidence, machineId);
     const aiEnabled = String(process.env.CHAT_ASSIST_AI_ENABLED || "true").toLowerCase() !== "false";
 
-    const forceDeterministic = [
-      "help",
-      "production_total",
-      "energy_total",
-      "reject_total",
-      "efficiency_average",
-      "pf_average",
-      "top_production_machine",
-      "top_energy_machine",
-      "top_reject_machine",
-      "low_efficiency_machine",
-      "production_details",
-      "reject_analysis",
-      "energy_details",
-      "efficiency_details",
-      "status_overview",
-      "machine_issues",
-      "plant_issues",
-      "machine_summary",
-      "plant_summary",
-    ].includes(intent);
-    const finalResponse = (aiEnabled && !forceDeterministic)
-      ? await polishWithOllama(message, intent, evidence, fallbackAnswer, fallbackSuggestions)
+    const finalResponse = aiEnabled
+      ? await polishWithOllama(message, evidence, fallbackAnswer, fallbackSuggestions, history)
       : { answer: fallbackAnswer, suggestions: fallbackSuggestions };
 
     const includeEvidence =
@@ -576,6 +704,51 @@ router.post("/ask", async (req, res) => {
   } catch (err) {
     console.error("POST /chat-assist/ask error:", err);
     return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/ask-stream", async (req, res) => {
+  const message = String(req.body?.message || "").trim();
+  if (!message) {
+    return res.status(400).json({ error: "message is required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const history = req.body?.history;
+    const { intent, evidence, fallbackSuggestions, fallbackAnswer } = await buildChatContext(message);
+    const aiEnabled = String(process.env.CHAT_ASSIST_AI_ENABLED || "true").toLowerCase() !== "false";
+
+    let answer = fallbackAnswer;
+    if (aiEnabled) {
+      answer = await streamAnswerWithOllama(message, evidence, fallbackAnswer, history, (token) => {
+        sendEvent("token", { token });
+      });
+    } else {
+      sendEvent("token", { token: fallbackAnswer });
+    }
+
+    sendEvent("done", {
+      answer,
+      suggestions: fallbackSuggestions,
+      intent,
+    });
+    return res.end();
+  } catch (err) {
+    console.error("POST /chat-assist/ask-stream error:", err);
+    sendEvent("error", { message: "Unable to stream chat response." });
+    return res.end();
   }
 });
 

@@ -24,6 +24,7 @@ export default function PeakDemand() {
   const [peakEvents, setPeakEvents] = useState<PeakEvent[]>([]);
   const [contractDemand, setContractDemand] = useState<number>(85);
   const [aiPrediction, setAiPrediction] = useState<AIPrediction | null>(null);
+  const [aiFetchError, setAiFetchError] = useState<boolean>(false);
 
   useEffect(() => {
     const fetchDemand = () => {
@@ -48,10 +49,11 @@ export default function PeakDemand() {
         const p = r.data || {};
         const source = String(p.source || "").toLowerCase();
         if (source !== "ai") {
-          setAiPrediction(null);
+          setAiFetchError(true);
           return;
         }
 
+        setAiFetchError(false);
         setAiPrediction({
           predicted_kva: Number(p.predicted_kva) || 0,
           confidence: Number(p.confidence) || 70,
@@ -60,7 +62,7 @@ export default function PeakDemand() {
           source: "ai",
         });
       }).catch(() => {
-        setAiPrediction(null);
+        setAiFetchError(true);
       });
     };
 
@@ -88,7 +90,9 @@ export default function PeakDemand() {
           title="AI Predicted Peak"
           value={aiPrediction ? predictedPeak.toFixed(1) : "--"}
           unit="kVA"
-          subtitle={aiPrediction ? `AI • ${aiPrediction.confidence}% confidence` : "AI prediction unavailable"}
+          subtitle={aiPrediction
+            ? (aiFetchError ? `AI • ${aiPrediction.confidence}% confidence (last known)` : `AI • ${aiPrediction.confidence}% confidence`)
+            : "AI prediction unavailable"}
           icon={<Brain className="h-4 w-4" />}
           variant={aiPrediction ? (predictedPeak > contractDemand ? 'warning' : 'success') : 'default'}
         />

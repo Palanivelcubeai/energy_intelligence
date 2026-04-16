@@ -62,6 +62,21 @@ CREATE TABLE machines (
 );
 
 -- ============================================================
+-- 3b. MACHINE TARGET CHANGE HISTORY
+-- ============================================================
+CREATE TABLE production_target_history (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    machine_id  VARCHAR(20) NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+    old_target  INT NOT NULL,
+    new_target  INT NOT NULL,
+    changed_by  VARCHAR(255),
+    source      VARCHAR(100),
+    changed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_target_history_machine_time ON production_target_history (machine_id, changed_at DESC);
+
+-- ============================================================
 -- 4. MACHINE METRICS (real-time / near-real-time snapshots)
 -- ============================================================
 CREATE TABLE machine_metrics (
@@ -212,6 +227,47 @@ CREATE TABLE insights (
 );
 
 CREATE INDEX idx_insights_severity_time ON insights (severity, created_at DESC);
+
+CREATE TABLE insight_feedback (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    insight_key VARCHAR(255) NOT NULL,
+    machine_id  VARCHAR(20),
+    vote        SMALLINT NOT NULL CHECK (vote IN (-1, 1)),
+    user_email  VARCHAR(255),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (insight_key, user_email)
+);
+
+CREATE INDEX idx_insight_feedback_time ON insight_feedback (created_at DESC);
+CREATE INDEX idx_insight_feedback_key ON insight_feedback (insight_key);
+
+CREATE TABLE alert_subscriptions (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_email  VARCHAR(255) NOT NULL,
+    alert_type  VARCHAR(64) NOT NULL,
+    channel     VARCHAR(32) NOT NULL,
+    destination TEXT,
+    enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_email, alert_type, channel)
+);
+
+CREATE INDEX idx_alert_subscriptions_user ON alert_subscriptions (user_email);
+
+CREATE TABLE alert_notification_logs (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    alert_type    VARCHAR(64) NOT NULL,
+    channel       VARCHAR(32) NOT NULL,
+    recipient     VARCHAR(255) NOT NULL,
+    payload       TEXT,
+    status        VARCHAR(20) NOT NULL,
+    response_code INT,
+    error         TEXT,
+    sent_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_alert_log_lookup ON alert_notification_logs (alert_type, channel, recipient, sent_at DESC);
 
 -- ============================================================
 -- 11. CARBON & EMISSIONS TRACKING
