@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const pool = require("../db");
+const { getPredictiveMaintenancePayload } = require("../services/predictiveMaintenanceService");
 
 function toNum(value, fallback = 0) {
   const n = Number.parseFloat(value);
@@ -30,6 +31,347 @@ function parseJsonObject(text) {
 
   return null;
 }
+
+function median(values) {
+  const nums = (values || []).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (nums.length === 0) return 0;
+  const mid = Math.floor(nums.length / 2);
+  if (nums.length % 2 === 0) return (nums[mid - 1] + nums[mid]) / 2;
+  return nums[mid];
+}
+
+function dayOfWeekUtc(dayValue) {
+  const d = new Date(dayValue);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.getUTCDay();
+}
+
+function formatDayLabel(dayValue) {
+  const d = new Date(dayValue);
+  if (!Number.isFinite(d.getTime())) return String(dayValue || "");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const monthShort = d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+  return `${dd} ${monthShort}`;
+}
+function isoUtcSeconds(date = new Date()) {
+  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function toIsoSecondsIfTimestampString(value) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(trimmed)) return value;
+  const parsed = new Date(trimmed);
+  if (!Number.isFinite(parsed.getTime())) return value;
+  return isoUtcSeconds(parsed);
+}
+
+function normalizeTimestamps(value) {
+  if (value == null) return value;
+  if (value instanceof Date) return isoUtcSeconds(value);
+  if (Array.isArray(value)) return value.map((item) => normalizeTimestamps(item));
+  if (typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = normalizeTimestamps(v);
+    }
+    return out;
+  }
+  return toIsoSecondsIfTimestampString(value);
+}
+
+function winsorizedMean(values, lowerQuantile = 0.1, upperQuantile = 0.9) {
+  const nums = (values || []).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (nums.length === 0) return 0;
+  if (nums.length < 4) return nums.reduce((s, v) => s + v, 0) / nums.length;
+
+  const loIndex = Math.floor((nums.length - 1) * lowerQuantile);
+  const hiIndex = Math.ceil((nums.length - 1) * upperQuantile);
+  const lo = nums[Math.max(0, loIndex)];
+  const hi = nums[Math.min(nums.length - 1, hiIndex)];
+
+  const bounded = nums.map((v) => clamp(v, lo, hi));
+  return bounded.reduce((s, v) => s + v, 0) / bounded.length;
+}
+
+function forecastRecentWeighted(peaks, index) {
+  const history = peaks.slice(Math.max(0, index - 3), index).map((x) => toNum(x.actual, 0)).filter((x) => x > 0);
+  if (history.length === 0) return 0;
+  if (history.length < 3) return history.reduce((s, v) => s + v, 0) / history.length;
+  return (history[0] * 0.2) + (history[1] * 0.3) + (history[2] * 0.5);
+}
+
+function forecastWeekdayMedian(peaks, index) {
+  const history = peaks.slice(Math.max(0, index - 14), index).map((x) => toNum(x.actual, 0)).filter((x) => x > 0);
+  if (history.length === 0) return 0;
+
+  const targetDow = dayOfWeekUtc(peaks[index].day);
+  const weekdayHistory = peaks
+    .slice(0, index)
+    .filter((x) => dayOfWeekUtc(x.day) === targetDow)
+    .map((x) => toNum(x.actual, 0))
+    .filter((x) => x > 0);
+
+  const weekdayCenter = weekdayHistory.length ? median(weekdayHistory) : median(history);
+  const historyCenter = median(history);
+  return (weekdayCenter * 0.7) + (historyCenter * 0.3);
+}
+
+function boundedForecast(value, history) {
+  const nums = (history || []).filter((v) => Number.isFinite(v) && v > 0);
+  if (nums.length === 0) return Math.max(0, value);
+  const lo = Math.min(...nums) * 0.8;
+  const hi = Math.max(...nums) * 1.2;
+  return clamp(Math.max(0, value), lo, hi);
+}
+
+function forecastSameDayLastWeek(peaks, index) {
+  if (index - 7 >= 0) {
+    return toNum(peaks[index - 7]?.actual, 0);
+  }
+
+  const history = peaks
+    .slice(Math.max(0, index - 7), index)
+    .map((x) => toNum(x.actual, 0))
+    .filter((x) => x > 0);
+  if (history.length === 0) return 0;
+  return median(history);
+}
+
+function evaluateModelError(peaks, endIndex, modelFn) {
+  const start = Math.max(3, endIndex - 5);
+  const errs = [];
+  for (let j = start; j < endIndex; j += 1) {
+    const history = peaks.slice(Math.max(0, j - 14), j).map((x) => toNum(x.actual, 0)).filter((x) => x > 0);
+    if (history.length === 0) continue;
+    const pred = boundedForecast(modelFn(peaks, j), history);
+    const actual = toNum(peaks[j].actual, 0);
+    if (actual <= 0) continue;
+    errs.push(Math.abs(pred - actual) / actual * 100);
+  }
+  if (errs.length === 0) return Number.POSITIVE_INFINITY;
+  return errs.reduce((s, v) => s + v, 0) / errs.length;
+}
+
+function forecastDemandPeak(peaks, index) {
+  const history = peaks.slice(Math.max(0, index - 14), index).map((x) => toNum(x.actual, 0)).filter((x) => x > 0);
+  if (history.length === 0) return 0;
+
+  const recentModel = (arr, i) => forecastRecentWeighted(arr, i);
+  const weekdayModel = (arr, i) => forecastWeekdayMedian(arr, i);
+  const weeklyModel = (arr, i) => forecastSameDayLastWeek(arr, i);
+
+  const recentErr = evaluateModelError(peaks, index, recentModel);
+  const weekdayErr = evaluateModelError(peaks, index, weekdayModel);
+  const weeklyErr = evaluateModelError(peaks, index, weeklyModel);
+
+  const recentPred = recentModel(peaks, index);
+  const weekdayPred = weekdayModel(peaks, index);
+  const weeklyPred = weeklyModel(peaks, index);
+
+  const rw = 1 / (1 + recentErr);
+  const ww = 1 / (1 + weekdayErr);
+  const sw = 1 / (1 + weeklyErr);
+  const totalWeight = rw + ww + sw;
+
+  let blended = totalWeight > 0
+    ? ((recentPred * rw) + (weekdayPred * ww) + (weeklyPred * sw)) / totalWeight
+    : recentPred;
+
+  const trendLookback = history.slice(-6);
+  const trendDeltas = [];
+  for (let i = 1; i < trendLookback.length; i += 1) {
+    const prev = trendLookback[i - 1];
+    const curr = trendLookback[i];
+    if (prev > 0 && curr > 0) {
+      trendDeltas.push((curr - prev) / prev);
+    }
+  }
+  if (trendDeltas.length > 0) {
+    const trendSignal = winsorizedMean(trendDeltas, 0.1, 0.9);
+    const trendFactor = clamp(trendSignal, -0.08, 0.08);
+    blended = blended * (1 + trendFactor * 0.5);
+  }
+
+  return boundedForecast(blended, history);
+}
+
+function forecastDemandPeakBiasCorrected(peaks, index) {
+  const history = peaks.slice(Math.max(0, index - 14), index).map((x) => toNum(x.actual, 0)).filter((x) => x > 0);
+  if (history.length === 0) return 0;
+
+  const base = forecastDemandPeak(peaks, index);
+  const ratioResiduals = [];
+  const backStart = Math.max(3, index - 5);
+  for (let j = backStart; j < index; j += 1) {
+    const jHistory = peaks.slice(Math.max(0, j - 14), j).map((x) => toNum(x.actual, 0)).filter((x) => x > 0);
+    if (jHistory.length === 0) continue;
+    const jPred = forecastDemandPeak(peaks, j);
+    const jActual = toNum(peaks[j].actual, 0);
+    if (jActual <= 0 || jPred <= 0) continue;
+    ratioResiduals.push(jActual / jPred);
+  }
+
+  const biasRatio = ratioResiduals.length > 0
+    ? clamp(winsorizedMean(ratioResiduals, 0.2, 0.8), 0.9, 1.1)
+    : 1;
+  const corrected = base * (1 + ((biasRatio - 1) * 0.7));
+  return boundedForecast(corrected, history);
+}
+
+function computeDemandBacktestMetrics(peaks, includeTrend = false, windowDays = 7) {
+  const scored = [];
+  for (let i = 3; i < peaks.length; i += 1) {
+    const predicted = forecastDemandPeakBiasCorrected(peaks, i);
+    const actual = toNum(peaks[i].actual, 0);
+    const errPct = actual > 0 ? Math.abs(predicted - actual) / actual * 100 : 100;
+    const hit10 = errPct <= 10;
+    const hit20 = errPct <= 20;
+
+    scored.push({
+      day: formatDayLabel(peaks[i].day),
+      predicted: Math.round(predicted * 10) / 10,
+      actual: Math.round(actual * 10) / 10,
+      errorPct: Math.round(errPct * 10) / 10,
+      hit: hit20,
+      hit10,
+    });
+  }
+
+  const recent = scored.slice(-Math.max(1, windowDays));
+  const samples = recent.length;
+  if (samples === 0) {
+    return {
+      samples: 0,
+      ready: false,
+      hit20: 0,
+      hit10: 0,
+      mape: 0,
+      rawMape: 0,
+      score: 0,
+      trend: includeTrend ? [] : undefined,
+    };
+  }
+
+  const errorPcts = recent.map((x) => x.errorPct);
+  const rawMape = errorPcts.reduce((s, v) => s + v, 0) / errorPcts.length;
+  const mape = winsorizedMean(errorPcts, 0.1, 0.9);
+  const hit20 = recent.filter((x) => x.hit).length / samples * 100;
+  const hit10 = recent.filter((x) => x.hit10).length / samples * 100;
+  const outlierDays = recent.filter((x) => x.errorPct > 30).length;
+  const ready = samples >= MIN_DEMAND_BACKTEST_SAMPLES;
+
+  const mapeScore = clamp(Math.round(100 - mape), 0, 100);
+  const score = ready ? clamp(Math.round((mapeScore * 0.7) + (hit20 * 0.3)), 0, 100) : 0;
+
+  return {
+    samples,
+    ready,
+    hit20,
+    hit10,
+    outlierDays,
+    mape,
+    rawMape,
+    score,
+    trend: includeTrend ? recent : undefined,
+  };
+}
+
+function buildDemandMetricNote(shortWindow, longWindow) {
+  if (!shortWindow || shortWindow.samples === 0) return "Awaiting enough demand backtest points.";
+
+  const notes = [];
+  if ((shortWindow.outlierDays || 0) > 0) {
+    notes.push(`${shortWindow.outlierDays} outlier day(s) (>30% error) affected the recent window.`);
+  }
+  if (longWindow && longWindow.samples >= 14) {
+    const mapeDelta = shortWindow.mape - longWindow.mape;
+    if (Math.abs(mapeDelta) >= 2) {
+      const text = Math.abs(Math.round(mapeDelta * 10) / 10);
+      notes.push(
+        mapeDelta > 0
+          ? `Recent 14-day MAPE is ${text} points higher than the 30-day baseline.`
+          : `Recent 14-day MAPE is ${text} points lower than the 30-day baseline.`
+      );
+    }
+
+    const hitDelta = shortWindow.hit20 - longWindow.hit20;
+    if (Math.abs(hitDelta) >= 5) {
+      const text = Math.abs(Math.round(hitDelta));
+      notes.push(
+        hitDelta > 0
+          ? `Recent 20% hit-rate improved by ${text} points vs 30-day baseline.`
+          : `Recent 20% hit-rate dropped by ${text} points vs 30-day baseline.`
+      );
+    }
+  }
+
+  return notes.length === 0
+    ? "Recent demand accuracy is stable against the 30-day baseline."
+    : notes.join(" ");
+}
+
+function computeDemandOperationalStatus(shortWindow, longWindow, ready) {
+  if (!ready || !shortWindow || shortWindow.samples < MIN_DEMAND_BACKTEST_SAMPLES) {
+    return {
+      status: "Calibrating",
+      reason: `Needs at least ${MIN_DEMAND_BACKTEST_SAMPLES} recent backtest samples for reliable status.`,
+    };
+  }
+
+  const mapeRecent = toNum(shortWindow.mape, 100);
+  const hit20Recent = toNum(shortWindow.hit20, 0);
+  const outliers = toNum(shortWindow.outlierDays, 0);
+  const mape30 = longWindow && longWindow.samples >= 14 ? toNum(longWindow.mape, mapeRecent) : mapeRecent;
+  const hit2030 = longWindow && longWindow.samples >= 14 ? toNum(longWindow.hit20, hit20Recent) : hit20Recent;
+  const severeDrift = (hit20Recent - hit2030) <= -15 || (mapeRecent - mape30) >= 5;
+
+  if (mapeRecent >= 20 || hit20Recent < 60 || outliers >= 3 || severeDrift) {
+    return {
+      status: "Action Needed",
+      reason: "High recent forecast error or low practical hit-rate requires model/data review.",
+    };
+  }
+
+  if (mapeRecent >= 15 || hit20Recent < 75 || (mapeRecent - mape30) >= 3 || outliers >= 2) {
+    return {
+      status: "Watch",
+      reason: "Performance is acceptable but has short-term drift or outlier impact.",
+    };
+  }
+
+  return {
+    status: "Stable",
+    reason: "Recent demand forecast stays within practical operating thresholds.",
+  };
+}
+
+async function getDemandPeaks(daysLookback = 21) {
+  const { rows } = await pool.query(
+    `SELECT recorded_at::date AS day, MAX(demand_kva)::numeric AS actual_peak
+     FROM demand_records
+     WHERE recorded_at::date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+     GROUP BY recorded_at::date
+     ORDER BY day`,
+    [Math.max(7, Number.parseInt(String(daysLookback), 10) || 21)]
+  );
+
+  return (rows || [])
+    .map((r) => ({ day: r.day, actual: toNum(r.actual_peak, 0) }))
+    .filter((r) => r.actual > 0);
+}
+
+const MIN_DEMAND_BACKTEST_SAMPLES = 7;
+const DEMAND_RECENT_WINDOW_DAYS = 14;
+const DEMAND_BASELINE_WINDOW_DAYS = 30;
+const INTELLIGENCE_DOC_CACHE_TTL_MS = Math.max(1000, toNum(process.env.INTELLIGENCE_DOC_CACHE_TTL_MS, 30000));
+
+let intelligenceDocCache = {
+  key: null,
+  expiresAt: 0,
+  value: null,
+};
 
 const DEFAULT_REPORTS = [
   {
@@ -70,23 +412,12 @@ const DEFAULT_REPORTS = [
   },
   {
     key: "intelligence_summary",
-    name: "Intelligence Summary Report",
-    description: "AI usage, machine performance, prediction health and overall intelligence accuracy",
+    name: "Intelligence Summary",
+    description: "AI-generated plant intelligence with confidence and demand forecast reliability",
     lastGenerated: null,
   },
 ];
 
-const intelligenceDocCache = {
-  value: null,
-  generatedAtMs: 0,
-};
-
-const INTELLIGENCE_DOC_CACHE_TTL_MS = Math.max(
-  10000,
-  toNum(process.env.INTELLIGENCE_REPORT_CACHE_TTL_MS, 120000)
-);
-
-// GET /api/reports/list
 router.get("/list", async (_req, res) => {
   try {
     const { rows } = await pool.query(
@@ -95,89 +426,79 @@ router.get("/list", async (_req, res) => {
        FROM reports ORDER BY created_at`
     );
     if (!rows || rows.length === 0) {
-      return res.json(DEFAULT_REPORTS);
+      return res.json(normalizeTimestamps(DEFAULT_REPORTS));
     }
 
-    // Merge DB metadata with defaults so newly added reports are visible
-    // even when the metadata table is not yet backfilled.
-    const byKey = new Map((rows || []).map((r) => [r.key, r]));
-    for (const r of DEFAULT_REPORTS) {
-      if (!byKey.has(r.key)) byKey.set(r.key, r);
+    // Preserve DB-defined rows while ensuring built-in report cards are always available.
+    const merged = [...rows];
+    const existingKeys = new Set(rows.map((r) => String(r?.key || "")));
+    for (const fallback of DEFAULT_REPORTS) {
+      if (!existingKeys.has(fallback.key)) {
+        merged.push(fallback);
+      }
     }
 
-    const merged = Array.from(byKey.values());
-    const ordered = [
-      ...DEFAULT_REPORTS.map((r) => merged.find((m) => m.key === r.key)).filter(Boolean),
-      ...merged.filter((m) => !DEFAULT_REPORTS.some((r) => r.key === m.key)),
-    ];
-
-    res.json(ordered);
+    res.json(normalizeTimestamps(merged));
   } catch (err) {
-    // If reports table does not exist in the current DB setup, serve default metadata.
     if (err && (err.code === "42P01" || err.code === "42703")) {
-      return res.json(DEFAULT_REPORTS);
+      return res.json(normalizeTimestamps(DEFAULT_REPORTS));
     }
     console.error("GET /reports/list error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /api/reports/intelligence-summary/document
 router.get("/intelligence-summary/document", async (_req, res) => {
   try {
-    const now = Date.now();
-    if (intelligenceDocCache.value && (now - intelligenceDocCache.generatedAtMs) < INTELLIGENCE_DOC_CACHE_TTL_MS) {
-      return res.json(intelligenceDocCache.value);
+    const cacheKey = "doc:full";
+    if (intelligenceDocCache.key === cacheKey && intelligenceDocCache.expiresAt > Date.now() && intelligenceDocCache.value) {
+      return res.json(normalizeTimestamps(intelligenceDocCache.value));
     }
 
     const document = await getIntelligenceSummaryDocument();
-    intelligenceDocCache.value = document;
-    intelligenceDocCache.generatedAtMs = now;
-    return res.json(document);
+    intelligenceDocCache = {
+      key: cacheKey,
+      value: document,
+      expiresAt: Date.now() + INTELLIGENCE_DOC_CACHE_TTL_MS,
+    };
+    return res.json(normalizeTimestamps(document));
   } catch (err) {
-    if (err && (err.code === "42P01" || err.code === "42703")) {
-      return res.json({
-        title: "Intelligence Summary Report",
-        generatedAt: new Date().toISOString(),
-        modelUsed: process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b",
-        executiveSummary: "Intelligence report data is currently limited because required source tables are not fully available.",
-        sectionSummaries: [],
-        recommendations: ["Complete source data setup and run at least 7 days of metrics for full intelligence reporting."],
-        kpis: [],
-        aiAccuracy: {
-          overall: 0,
-          insightConfidence: 0,
-          predictiveConfidence: 0,
-          dataFreshness: 0,
-          demandBacktest: 0,
-        },
-        charts: {
-          productionEnergyTrend: [],
-          demandAccuracyTrend: [],
-        },
-        machines: [],
-      });
-    }
     console.error("GET /reports/intelligence-summary/document error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Failed to generate intelligence summary document" });
   }
 });
 
-// GET /api/reports/:key/data
+router.get("/intelligence-summary/document-fast", async (_req, res) => {
+  try {
+    const cacheKey = "doc:fast";
+    if (intelligenceDocCache.key === cacheKey && intelligenceDocCache.expiresAt > Date.now() && intelligenceDocCache.value) {
+      return res.json(normalizeTimestamps(intelligenceDocCache.value));
+    }
+
+    const document = await getIntelligenceSummaryDocument({ skipAiNarrative: true });
+    intelligenceDocCache = {
+      key: cacheKey,
+      value: document,
+      expiresAt: Date.now() + INTELLIGENCE_DOC_CACHE_TTL_MS,
+    };
+    return res.json(normalizeTimestamps(document));
+  } catch (err) {
+    console.error("GET /reports/intelligence-summary/document-fast error:", err);
+    return res.status(500).json({ error: "Failed to generate intelligence summary document" });
+  }
+});
+
 router.get("/:key/data", async (req, res) => {
   try {
     const key = req.params.key;
 
-    // Update last_generated where reports metadata table exists.
     try {
       await pool.query(
-        "UPDATE reports SET last_generated = NOW(), updated_at = NOW() WHERE report_key = $1",
+        "UPDATE reports SET last_generated = date_trunc('second', NOW()), updated_at = date_trunc('second', NOW()) WHERE report_key = $1",
         [key]
       );
     } catch (e) {
-      if (!(e && e.code === "42P01")) {
-        throw e;
-      }
+      if (!(e && e.code === "42P01")) throw e;
     }
 
     let data;
@@ -206,15 +527,14 @@ router.get("/:key/data", async (req, res) => {
       default:
         return res.status(404).json({ error: "Report not found" });
     }
-    res.json(data);
+
+    return res.json(normalizeTimestamps(data));
   } catch (err) {
-    // In this project, report source tables vary across setup scripts.
-    // Return empty report data instead of 500 when optional tables/columns are missing.
     if (err && (err.code === "42P01" || err.code === "42703")) {
       return res.json([]);
     }
     console.error(`GET /reports/${req.params.key}/data error:`, err);
-    res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -309,220 +629,70 @@ async function getCostOptimizationReport() {
 async function getIntelligenceSummaryReport() {
   const rows = [];
 
-  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-  const pctDelta = (current, previous) => {
-    const c = Number(current || 0);
-    const p = Number(previous || 0);
-    if (!Number.isFinite(c) || !Number.isFinite(p)) return 0;
-    if (p === 0) return c === 0 ? 0 : 100;
-    return ((c - p) / p) * 100;
+  // Build appendix rows from the intelligence document payload so /reports/intelligence_summary/data
+  // always returns a table-friendly array for the frontend ReportTable.
+  const doc = await getIntelligenceSummaryDocument();
+  const ai = doc?.aiAccuracy || {};
+  const kpis = doc?.kpis || {};
+  const hitDelta = toNum(ai.demandHitRateDelta, toNum(ai.demandHitRate, 0) - toNum(ai.demandHitRate30, 0));
+  const mapeDelta = toNum(ai.demandMapeDelta, toNum(ai.demandMape, 0) - toNum(ai.demandMape30, 0));
+  const deltaLabel = (delta, lowerIsBetter = false) => {
+    if (!Number.isFinite(delta) || Math.abs(delta) < 0.05) return "(→ 0.0 vs baseline)";
+    const arrow = delta > 0 ? "↑" : "↓";
+    const sign = delta > 0 ? "+" : "";
+    const polarityNote = lowerIsBetter
+      ? (delta > 0 ? "worse" : "better")
+      : (delta > 0 ? "better" : "worse");
+    return `(${arrow} ${sign}${Math.round(delta * 10) / 10} vs baseline, ${polarityNote})`;
   };
 
-  const machineStatusRes = await pool.query(
-    `SELECT
-       COUNT(*)::int AS total_machines,
-       COALESCE(SUM((status = 'running')::int), 0)::int AS running_machines,
-       COALESCE(SUM((status = 'idle')::int), 0)::int AS idle_machines,
-       COALESCE(SUM((status = 'maintenance')::int), 0)::int AS maintenance_machines
-     FROM machines`
-  );
-  const status = machineStatusRes.rows?.[0] || {
-    total_machines: 0,
-    running_machines: 0,
-    idle_machines: 0,
-    maintenance_machines: 0,
+  const buildAction = (metric) => {
+    if (metric.includes("Demand hit-rate")) return "Monitor 24h and recalibrate demand model if trend remains below target";
+    if (metric.includes("Demand MAPE")) return "Investigate outlier day drivers and recalibrate demand model";
+    if (metric.includes("Outlier days")) return "Review top outlier days for production anomaly or load-shift events";
+    if (metric.includes("Demand status")) return "Follow escalation rule block and assign owner for corrective action";
+    if (metric.includes("Data freshness")) return "Check sensor/data gap and restore ingestion cadence";
+    if (metric.includes("Data completeness")) return "Check sensor/data gap and backfill missing intervals";
+    if (metric.includes("Missing intervals")) return "Validate ingestion pipeline and network connectivity";
+    if (metric.includes("Predictive confidence")) return "Track reliability daily; recalibrate if confidence remains low";
+    if (metric.includes("Insight confidence")) return "Monitor 24h and validate low-confidence recommendations manually";
+    if (metric.includes("Reject rate")) return "Prioritize process stabilization on high-risk machines this shift";
+    if (metric.includes("Avg efficiency")) return "Tune cycle parameters and reduce idle losses this week";
+    return "Monitor 24h";
   };
 
-  const latestMetricsRes = await pool.query(
-    `SELECT DISTINCT ON (machine_id)
-       machine_id,
-       COALESCE(kw, 0) AS kw,
-       COALESCE(kwh, 0) AS kwh,
-       COALESCE(parts_produced, 0) AS parts_produced,
-       COALESCE(rejection_count, 0) AS rejection_count,
-       COALESCE(efficiency_score, 0) AS efficiency_score,
-       COALESCE(runtime_hours, 0) AS runtime_hours,
-       COALESCE(idle_hours, 0) AS idle_hours,
-       COALESCE(power_factor, 0) AS power_factor,
-       recorded_at
-     FROM machine_metrics
-     WHERE recorded_at >= NOW() - INTERVAL '24 hours'
-     ORDER BY machine_id, recorded_at DESC`
-  );
+  const add = (section, metric, value, status) => {
+    rows.push({
+      section,
+      metric,
+      value,
+      status,
+      recommended_action: buildAction(metric),
+    });
+  };
 
-  const latestMetrics = latestMetricsRes.rows || [];
-  const totalParts = latestMetrics.reduce((s, r) => s + Number(r.parts_produced || 0), 0);
-  const totalRejects = latestMetrics.reduce((s, r) => s + Number(r.rejection_count || 0), 0);
-  const totalEnergy = latestMetrics.reduce((s, r) => s + Number(r.kwh || 0), 0);
-  const avgEfficiency = latestMetrics.length
-    ? latestMetrics.reduce((s, r) => s + Number(r.efficiency_score || 0), 0) / latestMetrics.length
-    : 0;
-  const avgPowerFactor = latestMetrics.length
-    ? latestMetrics.reduce((s, r) => s + Number(r.power_factor || 0), 0) / latestMetrics.length
-    : 0;
-  const rejectRate = totalParts > 0 ? (totalRejects / totalParts) * 100 : 0;
+  add('Overall Intelligence', 'Overall intelligence accuracy', `${toNum(ai.overall, 0)}%`, toNum(ai.overall, 0) >= 80 ? 'Strong' : 'Watch');
+  add('Overall Intelligence', 'Insight confidence', `${toNum(ai.insightConfidence, 0)}%${ai.insightConfidenceEstimated ? ' (estimated)' : ''}`, ai.insightConfidenceEstimated ? 'Estimated' : 'Measured');
+  add('Overall Intelligence', 'Predictive confidence', `${toNum(ai.predictiveConfidence, 0)}%`, toNum(ai.predictiveConfidence, 0) >= 75 ? 'Reliable' : 'Watch');
+  add('Overall Intelligence', 'Data completeness', `${toNum(ai.dataCompletenessPct, 0)}%`, toNum(ai.dataCompletenessPct, 0) >= 85 ? 'Good' : 'Limited');
+  add('Overall Intelligence', 'Missing intervals (24h)', `${toNum(ai.missingIntervalsCount, 0)}`, toNum(ai.missingIntervalsCount, 0) > 0 ? 'Watch' : 'Stable');
 
-  const runtimeTotal = latestMetrics.reduce((s, r) => s + Number(r.runtime_hours || 0), 0);
-  const idleTotal = latestMetrics.reduce((s, r) => s + Number(r.idle_hours || 0), 0);
-  const utilizationPct = (runtimeTotal + idleTotal) > 0
-    ? (runtimeTotal / (runtimeTotal + idleTotal)) * 100
-    : 0;
+  add('Demand Forecast', 'Demand backtest score', `${toNum(ai.demandBacktest, 0)}%`, ai.demandBacktestReady ? 'Ready' : 'Calibrating');
+  add('Demand Forecast', 'Demand hit-rate (20% band)', `${toNum(ai.demandHitRate, 0)}% ${deltaLabel(hitDelta)}`, toNum(ai.demandHitRate, 0) >= 75 ? 'Good' : 'Watch');
+  add('Demand Forecast', 'Demand hit-rate (10% band)', `${toNum(ai.demandHitRate10, 0)}%`, toNum(ai.demandHitRate10, 0) >= 60 ? 'Good' : 'Watch');
+  add('Demand Forecast', 'Demand hit-rate (30d baseline)', `${toNum(ai.demandHitRate30, 0)}%`, 'Baseline');
+  add('Demand Forecast', 'Demand MAPE (winsorized)', `${toNum(ai.demandMape, 0)}% ${deltaLabel(mapeDelta, true)}`, toNum(ai.demandMape, 0) <= 15 ? 'Good' : 'High error');
+  add('Demand Forecast', 'Demand MAPE (raw)', `${toNum(ai.demandMapeRaw, toNum(ai.demandMape, 0))}%`, 'Observed');
+  add('Demand Forecast', 'Demand MAPE (30d baseline)', `${toNum(ai.demandMape30, toNum(ai.demandMape, 0))}%`, 'Baseline');
+  add('Demand Forecast', 'Outlier days (>30% error)', String(toNum(ai.demandOutlierDays, 0)), toNum(ai.demandOutlierDays, 0) > 0 ? 'Watch' : 'Stable');
+  add('Demand Forecast', 'Demand status', String(ai.demandStatus || 'Calibrating'), String(ai.demandStatus || 'Calibrating'));
+  add('Demand Forecast', 'Demand status reason', String(ai.demandStatusReason || 'Waiting for enough samples.'), 'Info');
+  add('Demand Forecast', 'Why score changed', String(ai.demandMetricNote || 'No major change from baseline.'), 'Info');
 
-  const freshnessMinutes = latestMetrics.length
-    ? latestMetrics.reduce((s, r) => {
-        const ts = r.recorded_at ? new Date(r.recorded_at).getTime() : Date.now();
-        return s + Math.max(0, (Date.now() - ts) / 60000);
-      }, 0) / latestMetrics.length
-    : 999;
-  const dataFreshnessScore = clamp(Math.round(100 - (freshnessMinutes * 1.5)), 40, 99);
-
-  const predictiveHighRisk = latestMetrics.filter((r) => {
-    let flags = 0;
-    if (Number(r.rejection_count || 0) > 0 && Number(r.parts_produced || 0) > 0 && ((Number(r.rejection_count || 0) / Number(r.parts_produced || 1)) * 100) >= 5) flags += 1;
-    if (Number(r.efficiency_score || 0) < 75) flags += 1;
-    if (Number(r.power_factor || 1) < 0.9) flags += 1;
-    return flags >= 2;
-  }).length;
-  const predictiveCoveragePct = status.total_machines > 0
-    ? (latestMetrics.length / Number(status.total_machines)) * 100
-    : 0;
-  const predictiveConfidence = clamp(Math.round(92 - (freshnessMinutes * 1.2)), 45, 99);
-
-  let insight24h = 0;
-  let avgInsightConfidence = 0;
-  try {
-    const insightStats = await pool.query(
-      `SELECT
-         COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::int AS insights_24h,
-         COALESCE(AVG(confidence_pct), 0)::numeric AS avg_confidence
-       FROM insights
-       WHERE created_at >= NOW() - INTERVAL '7 days'`
-    );
-    insight24h = Number(insightStats.rows?.[0]?.insights_24h || 0);
-    avgInsightConfidence = Number(insightStats.rows?.[0]?.avg_confidence || 0);
-  } catch (_e) {
-    // insights table can be optional in some setup states.
-  }
-
-  const confidenceValues = [avgInsightConfidence, predictiveConfidence, dataFreshnessScore].filter((v) => Number.isFinite(v) && v > 0);
-  const overallAccuracy = confidenceValues.length
-    ? Math.round(confidenceValues.reduce((s, v) => s + v, 0) / confidenceValues.length)
-    : 0;
-
-  let todayProduction = 0;
-  let yesterdayProduction = 0;
-  let last7Production = 0;
-  let prev7Production = 0;
-  let todayEnergy = 0;
-  let yesterdayEnergy = 0;
-  let last7Energy = 0;
-  let prev7Energy = 0;
-  try {
-    const trendRes = await pool.query(
-      `SELECT
-         SUM(CASE WHEN record_date = CURRENT_DATE THEN COALESCE(production, 0) ELSE 0 END)::numeric AS today_production,
-         SUM(CASE WHEN record_date = CURRENT_DATE - INTERVAL '1 day' THEN COALESCE(production, 0) ELSE 0 END)::numeric AS yesterday_production,
-         SUM(CASE WHEN record_date BETWEEN CURRENT_DATE - INTERVAL '6 days' AND CURRENT_DATE THEN COALESCE(production, 0) ELSE 0 END)::numeric AS last7_production,
-         SUM(CASE WHEN record_date BETWEEN CURRENT_DATE - INTERVAL '13 days' AND CURRENT_DATE - INTERVAL '7 days' THEN COALESCE(production, 0) ELSE 0 END)::numeric AS prev7_production,
-
-         SUM(CASE WHEN record_date = CURRENT_DATE THEN COALESCE(energy_kwh, 0) ELSE 0 END)::numeric AS today_energy,
-         SUM(CASE WHEN record_date = CURRENT_DATE - INTERVAL '1 day' THEN COALESCE(energy_kwh, 0) ELSE 0 END)::numeric AS yesterday_energy,
-         SUM(CASE WHEN record_date BETWEEN CURRENT_DATE - INTERVAL '6 days' AND CURRENT_DATE THEN COALESCE(energy_kwh, 0) ELSE 0 END)::numeric AS last7_energy,
-         SUM(CASE WHEN record_date BETWEEN CURRENT_DATE - INTERVAL '13 days' AND CURRENT_DATE - INTERVAL '7 days' THEN COALESCE(energy_kwh, 0) ELSE 0 END)::numeric AS prev7_energy
-       FROM energy_output_daily
-       WHERE record_date BETWEEN CURRENT_DATE - INTERVAL '13 days' AND CURRENT_DATE`
-    );
-
-    const tr = trendRes.rows?.[0] || {};
-    todayProduction = Number(tr.today_production || 0);
-    yesterdayProduction = Number(tr.yesterday_production || 0);
-    last7Production = Number(tr.last7_production || 0);
-    prev7Production = Number(tr.prev7_production || 0);
-    todayEnergy = Number(tr.today_energy || 0);
-    yesterdayEnergy = Number(tr.yesterday_energy || 0);
-    last7Energy = Number(tr.last7_energy || 0);
-    prev7Energy = Number(tr.prev7_energy || 0);
-  } catch (_e) {
-    // Optional source table in some setup states.
-  }
-
-  let demandBacktestSamples = 0;
-  let demandHitRatePct = 0;
-  let demandMapePct = 0;
-  let demandAccuracyScore = 0;
-  try {
-    const demandRes = await pool.query(
-      `SELECT recorded_at::date AS day, MAX(demand_kva)::numeric AS actual_peak
-       FROM demand_records
-       WHERE recorded_at::date >= CURRENT_DATE - INTERVAL '15 days'
-       GROUP BY recorded_at::date
-       ORDER BY day`
-    );
-
-    const peaks = (demandRes.rows || [])
-      .map((r) => ({ day: String(r.day), actual: Number(r.actual_peak || 0) }))
-      .filter((r) => r.actual > 0);
-
-    const scored = [];
-    for (let i = 3; i < peaks.length; i += 1) {
-      const prev = peaks.slice(i - 3, i);
-      const predicted = prev.reduce((s, x) => s + x.actual, 0) / Math.max(1, prev.length);
-      const actual = peaks[i].actual;
-      const errPct = actual > 0 ? Math.abs(predicted - actual) / actual * 100 : 100;
-      const hit = errPct <= 10;
-      scored.push({ errPct, hit });
-    }
-
-    const recent = scored.slice(-7);
-    demandBacktestSamples = recent.length;
-    if (recent.length > 0) {
-      demandMapePct = recent.reduce((s, x) => s + x.errPct, 0) / recent.length;
-      demandHitRatePct = recent.filter((x) => x.hit).length / recent.length * 100;
-      demandAccuracyScore = clamp(Math.round(100 - demandMapePct), 0, 100);
-    }
-  } catch (_e) {
-    // Optional source table in some setup states.
-  }
-
-  const prodDayDelta = pctDelta(todayProduction, yesterdayProduction);
-  const prodWeekDelta = pctDelta(last7Production, prev7Production);
-  const energyDayDelta = pctDelta(todayEnergy, yesterdayEnergy);
-  const energyWeekDelta = pctDelta(last7Energy, prev7Energy);
-
-  const executiveSummary = [
-    `AI operations are ${overallAccuracy >= 80 ? 'strong' : overallAccuracy >= 65 ? 'stable' : 'under watch'} with estimated intelligence accuracy at ${overallAccuracy}%.`,
-    `Plant now runs ${status.running_machines}/${status.total_machines} machines with avg efficiency ${Math.round(avgEfficiency)}% and reject rate ${Math.round(rejectRate * 10) / 10}%.`,
-    `Production trend: ${Math.round(prodDayDelta)}% vs yesterday and ${Math.round(prodWeekDelta)}% vs previous week; energy trend: ${Math.round(energyDayDelta)}% day-over-day and ${Math.round(energyWeekDelta)}% week-over-week.`,
-    demandBacktestSamples > 0
-      ? `Demand forecast backtest over ${demandBacktestSamples} recent days shows ${Math.round(demandHitRatePct)}% hit rate and ${Math.round(demandAccuracyScore)}% accuracy score.`
-      : 'Demand forecast backtest is not yet available due to limited historical demand records.',
-  ].join(' ');
-
-  rows.push(
-    { section: 'Executive Summary', metric: 'Plant intelligence overview', value: executiveSummary, status: 'Auto-generated' },
-
-    { section: 'AI Adoption', metric: 'AI stack in use', value: 'Ollama + rule-backed intelligence services', status: 'Active' },
-    { section: 'AI Adoption', metric: 'Natural chat assist', value: 'Enabled (realtime evidence + streaming response)', status: 'Running' },
-    { section: 'AI Adoption', metric: 'AI insights generated (24h)', value: String(insight24h), status: insight24h > 0 ? 'Healthy' : 'Low activity' },
-
-    { section: 'Machine Performance', metric: 'Machine status split', value: `Running ${status.running_machines}, Idle ${status.idle_machines}, Maintenance ${status.maintenance_machines}`, status: 'Live' },
-    { section: 'Machine Performance', metric: 'Total production (latest snapshot)', value: `${totalParts} parts`, status: 'Live' },
-    { section: 'Machine Performance', metric: 'Total energy (latest snapshot)', value: `${Math.round(totalEnergy * 100) / 100} kWh`, status: 'Live' },
-    { section: 'Machine Performance', metric: 'Plant efficiency and reject trend', value: `Avg efficiency ${Math.round(avgEfficiency)}%, Reject rate ${Math.round(rejectRate * 10) / 10}%`, status: 'Monitored' },
-    { section: 'Machine Performance', metric: 'Runtime utilization', value: `${Math.round(utilizationPct)}% runtime utilization`, status: utilizationPct >= 70 ? 'Good' : 'Needs improvement' },
-    { section: 'Machine Performance', metric: 'Production trend (DoD / WoW)', value: `${Math.round(prodDayDelta)}% day-over-day, ${Math.round(prodWeekDelta)}% week-over-week`, status: prodDayDelta >= 0 ? 'Improving' : 'Declining' },
-    { section: 'Machine Performance', metric: 'Energy trend (DoD / WoW)', value: `${Math.round(energyDayDelta)}% day-over-day, ${Math.round(energyWeekDelta)}% week-over-week`, status: energyDayDelta <= 0 ? 'Efficient' : 'Rising energy use' },
-
-    { section: 'Prediction Health', metric: 'Predictive coverage', value: `${Math.round(predictiveCoveragePct)}% of machines with fresh predictive signals`, status: predictiveCoveragePct >= 80 ? 'Good' : 'Partial' },
-    { section: 'Prediction Health', metric: 'High-risk machine predictions', value: `${predictiveHighRisk} machine(s) flagged high risk`, status: predictiveHighRisk > 0 ? 'Action needed' : 'Stable' },
-    { section: 'Prediction Health', metric: 'Predictive confidence', value: `${predictiveConfidence}%`, status: predictiveConfidence >= 75 ? 'Reliable' : 'Low confidence' },
-    { section: 'Prediction Health', metric: 'Demand forecast backtest hit rate', value: `${Math.round(demandHitRatePct)}% (within 10% error band)`, status: demandHitRatePct >= 70 ? 'Reliable' : demandBacktestSamples > 0 ? 'Needs tuning' : 'Insufficient data' },
-    { section: 'Prediction Health', metric: 'Demand forecast MAPE', value: demandBacktestSamples > 0 ? `${Math.round(demandMapePct * 10) / 10}% over ${demandBacktestSamples} days` : 'Not enough history', status: demandMapePct <= 15 ? 'Good' : demandBacktestSamples > 0 ? 'High error' : 'Pending' },
-
-    { section: 'Overall Intelligence Accuracy', metric: 'Overall intelligence accuracy (estimated)', value: `${overallAccuracy}%`, status: overallAccuracy >= 80 ? 'Strong' : overallAccuracy >= 65 ? 'Moderate' : 'Needs calibration' },
-    { section: 'Overall Intelligence Accuracy', metric: 'Supporting confidence signals', value: `Insights ${Math.round(avgInsightConfidence)}%, Predictive ${predictiveConfidence}%, Data freshness ${dataFreshnessScore}%, Demand backtest ${Math.round(demandAccuracyScore)}%`, status: 'Composite' },
-    { section: 'Overall Intelligence Accuracy', metric: 'Average power quality confidence marker', value: `Avg PF ${Math.round(avgPowerFactor * 100) / 100}`, status: avgPowerFactor >= 0.9 ? 'Within target' : 'Below target' }
-  );
+  add('Plant KPIs', 'Machines running', `${toNum(kpis.runningMachines, 0)}/${toNum(kpis.totalMachines, 0)}`, 'Live');
+  add('Plant KPIs', 'Avg efficiency', `${toNum(kpis.avgEfficiency, 0)}%`, toNum(kpis.avgEfficiency, 0) >= 75 ? 'Good' : 'Watch');
+  add('Plant KPIs', 'Reject rate', `${toNum(kpis.rejectRatePct, 0)}%`, toNum(kpis.rejectRatePct, 0) <= 5 ? 'Good' : 'Watch');
+  add('Plant KPIs', 'Data freshness', `${toNum(ai.dataFreshness, 0)}%`, toNum(ai.dataFreshness, 0) >= 80 ? 'Fresh' : 'Stale');
 
   return rows;
 }
@@ -615,8 +785,28 @@ async function buildNarrativeWithQwen(payload) {
   }
 }
 
-async function getIntelligenceSummaryDocument() {
-  const nowIso = new Date().toISOString();
+function buildFallbackNarrative(payload) {
+  return {
+    executiveSummary:
+      `AI monitoring is ${payload.aiAccuracy.overall >= 80 ? "strong" : "active"} with estimated overall intelligence accuracy at ${payload.aiAccuracy.overall}%. ` +
+      `Plant is running ${payload.kpis.runningMachines}/${payload.kpis.totalMachines} machines, with average efficiency ${payload.kpis.avgEfficiency}% and reject rate ${payload.kpis.rejectRatePct}%. ` +
+      `Recent trend shows production ${payload.kpis.productionTrendLabel} and energy ${payload.kpis.energyTrendLabel}.`,
+    sectionSummaries: [
+      { heading: "AI Usage", summary: "The platform uses Qwen via Ollama for natural language insights and recommendations grounded on realtime plant evidence." },
+      { heading: "Machine Operations", summary: "Machine KPIs are continuously summarized from latest metrics to track efficiency, rejects, utilization, and power quality." },
+      { heading: "Prediction Quality", summary: "Prediction health combines confidence, freshness, and recent backtest behavior to estimate reliability." },
+    ],
+    recommendations: [
+      "Prioritize highest reject-rate machine for immediate process stabilization.",
+      "Review lowest-efficiency machine setup and cycle parameters.",
+      "Track prediction backtest metrics daily and recalibrate thresholds when hit rate declines.",
+    ],
+  };
+}
+
+async function getIntelligenceSummaryDocument(options = {}) {
+  const skipAiNarrative = Boolean(options.skipAiNarrative);
+  const nowIso = isoUtcSeconds();
 
   const machineStatusRes = await pool.query(
     `SELECT
@@ -672,20 +862,44 @@ async function getIntelligenceSummaryDocument() {
         return s + Math.max(0, (Date.now() - ts) / 60000);
       }, 0) / latestMetrics.length
     : 999;
-  const dataFreshnessScore = clamp(Math.round(100 - freshnessMinutes * 1.5), 40, 99);
+  const dataFreshnessScore = clamp(Math.round(100 - (freshnessMinutes * 1.5)), 40, 99);
+
+  const metricsVolumeRes = await pool.query(
+    `SELECT COUNT(*)::int AS sample_count
+     FROM machine_metrics
+     WHERE recorded_at >= NOW() - INTERVAL '24 hours'`
+  );
+  const lastIngestionRes = await pool.query(
+    `SELECT MAX(recorded_at) AS last_ingestion
+     FROM machine_metrics`
+  );
+  const totalSamples24h = toNum(metricsVolumeRes.rows?.[0]?.sample_count, 0);
+  const lastIngestionRaw = lastIngestionRes.rows?.[0]?.last_ingestion || null;
+  const lastIngestionAt = lastIngestionRaw ? isoUtcSeconds(new Date(lastIngestionRaw)) : null;
+  const expectedIntervalSec = Math.max(20, toNum(process.env.MACHINE_METRIC_EXPECTED_INTERVAL_SEC, 40));
+  const machineCount = Math.max(1, toNum(status.total_machines, 1));
+  const expectedSamples24h = Math.max(1, Math.round((24 * 60 * 60 / expectedIntervalSec) * machineCount));
+  const missingIntervalsCount = Math.max(0, expectedSamples24h - totalSamples24h);
+  const dataCompletenessPct = clamp(Math.round((totalSamples24h / expectedSamples24h) * 100), 0, 100);
+  const forecastQualityWarning = dataCompletenessPct < 85
+    ? "Forecast quality limited by input gaps"
+    : "";
 
   let insight24h = 0;
   let avgInsightConfidence = 0;
+  let insightConfidenceSamples7d = 0;
   try {
     const insightStats = await pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::int AS insights_24h,
-         COALESCE(AVG(confidence_pct), 0)::numeric AS avg_confidence
+         COALESCE(AVG(confidence_pct), 0)::numeric AS avg_confidence,
+         COUNT(confidence_pct)::int AS confidence_samples
        FROM insights
        WHERE created_at >= NOW() - INTERVAL '7 days'`
     );
     insight24h = toNum(insightStats.rows?.[0]?.insights_24h, 0);
     avgInsightConfidence = toNum(insightStats.rows?.[0]?.avg_confidence, 0);
+    insightConfidenceSamples7d = toNum(insightStats.rows?.[0]?.confidence_samples, 0);
   } catch {}
 
   const predictiveConfidence = clamp(Math.round(92 - freshnessMinutes * 1.2), 45, 99);
@@ -737,46 +951,88 @@ async function getIntelligenceSummaryDocument() {
 
   let demandAccuracyTrend = [];
   let demandHitRatePct = 0;
+  let demandHitRateStrictPct = 0;
   let demandMapePct = 0;
+  let demandMapeRawPct = 0;
+  let demandHitRate30Pct = 0;
+  let demandMape30Pct = 0;
+  let demandBacktestSamples = 0;
+  let demandBacktestSamples30 = 0;
+  let demandOutlierDays = 0;
+  let demandMetricNote = "Awaiting enough demand backtest points.";
+  let demandStatus = "Calibrating";
+  let demandStatusReason = `Needs at least ${MIN_DEMAND_BACKTEST_SAMPLES} recent backtest samples for reliable status.`;
   let demandAccuracyScore = 0;
+  let demandBacktestReady = false;
   try {
-    const demandRes = await pool.query(
-      `SELECT recorded_at::date AS day, MAX(demand_kva)::numeric AS actual_peak
-       FROM demand_records
-       WHERE recorded_at::date >= CURRENT_DATE - INTERVAL '15 days'
-       GROUP BY recorded_at::date
-       ORDER BY day`
-    );
+    const peaks = await getDemandPeaks(45);
+    const demandMetrics = computeDemandBacktestMetrics(peaks, true, DEMAND_RECENT_WINDOW_DAYS);
+    const demandMetrics30 = computeDemandBacktestMetrics(peaks, false, DEMAND_BASELINE_WINDOW_DAYS);
+    demandBacktestSamples = demandMetrics.samples;
+    demandAccuracyTrend = demandMetrics.trend || [];
+    demandHitRatePct = demandMetrics.hit20;
+    demandHitRateStrictPct = demandMetrics.hit10;
+    demandMapePct = demandMetrics.mape;
+    demandMapeRawPct = demandMetrics.rawMape;
+    demandHitRate30Pct = demandMetrics30.hit20;
+    demandMape30Pct = demandMetrics30.mape;
+    demandBacktestSamples30 = demandMetrics30.samples;
+    demandOutlierDays = demandMetrics.outlierDays || 0;
+    demandMetricNote = buildDemandMetricNote(demandMetrics, demandMetrics30);
+    const demandStatusInfo = computeDemandOperationalStatus(demandMetrics, demandMetrics30, demandMetrics.ready);
+    demandStatus = demandStatusInfo.status;
+    demandStatusReason = demandStatusInfo.reason;
+    demandAccuracyScore = demandMetrics.score;
+    demandBacktestReady = demandMetrics.ready;
+  } catch (_e) {
+    // Optional source table in some setup states.
+  }
 
-    const peaks = (demandRes.rows || [])
-      .map((r) => ({ day: String(r.day), actual: toNum(r.actual_peak, 0) }))
-      .filter((r) => r.actual > 0);
+  const insightConfidenceDisplay = clamp(Math.round(avgInsightConfidence), 0, 100);
+  const demandHitRateDelta = Math.round((demandHitRatePct - demandHitRate30Pct) * 10) / 10;
+  const demandMapeDelta = Math.round((demandMapePct - demandMape30Pct) * 10) / 10;
+  const hitRateDeltaPenalty = Math.max(0, Math.abs(demandHitRateDelta) - 3) * 0.8;
+  const mapeDeltaPenalty = Math.max(0, Math.abs(demandMapeDelta) - 1.5) * 1.2;
+  const outlierPenalty = demandOutlierDays * 2.2;
+  const hitRateQualityBonus = clamp((demandHitRatePct - 60) * 0.2, 0, 8);
+  const mapeQualityBonus = clamp((16.5 - demandMapePct) * 1.0, 0, 8);
+  const readinessBonus = demandBacktestReady ? 7 : 0;
+  const modelConsistencyScore = clamp(
+    Math.round(
+      93 -
+      hitRateDeltaPenalty -
+      mapeDeltaPenalty -
+      outlierPenalty +
+      hitRateQualityBonus +
+      mapeQualityBonus +
+      readinessBonus
+    ),
+    48,
+    99
+  );
+  const backtestStabilityScore = clamp(
+    Math.round(100 - (demandOutlierDays * 12) - Math.max(0, demandMapePct - 10) * 2),
+    35,
+    99
+  );
+  const confidenceBreakdown = {
+    dataFreshness: { value: dataFreshnessScore, weightPct: 30 },
+    dataCompleteness: { value: dataCompletenessPct, weightPct: 25 },
+    modelConsistency: { value: modelConsistencyScore, weightPct: 25 },
+    backtestStability: { value: backtestStabilityScore, weightPct: 20 },
+  };
 
-    const scored = [];
-    for (let i = 3; i < peaks.length; i += 1) {
-      const prev = peaks.slice(i - 3, i);
-      const predicted = prev.reduce((s, x) => s + x.actual, 0) / Math.max(1, prev.length);
-      const actual = peaks[i].actual;
-      const errPct = actual > 0 ? Math.abs(predicted - actual) / actual * 100 : 100;
-      const hit = errPct <= 10;
-      scored.push({
-        day: peaks[i].day.slice(5),
-        predicted: Math.round(predicted * 10) / 10,
-        actual: Math.round(actual * 10) / 10,
-        errorPct: Math.round(errPct * 10) / 10,
-        hit,
-      });
-    }
+  const fallbackInsightConfidence = clamp(
+    Math.round((predictiveConfidence + dataFreshnessScore + (demandAccuracyScore > 0 ? demandAccuracyScore : predictiveConfidence)) / 3),
+    45,
+    98
+  );
+  const insightConfidenceEstimated = insightConfidenceSamples7d <= 0;
+  const insightConfidenceValue = insightConfidenceEstimated
+    ? fallbackInsightConfidence
+    : Math.round(avgInsightConfidence);
 
-    demandAccuracyTrend = scored.slice(-7);
-    if (demandAccuracyTrend.length > 0) {
-      demandMapePct = demandAccuracyTrend.reduce((s, x) => s + x.errorPct, 0) / demandAccuracyTrend.length;
-      demandHitRatePct = demandAccuracyTrend.filter((x) => x.hit).length / demandAccuracyTrend.length * 100;
-      demandAccuracyScore = clamp(Math.round(100 - demandMapePct), 0, 100);
-    }
-  } catch {}
-
-  const confidenceValues = [avgInsightConfidence, predictiveConfidence, dataFreshnessScore, demandAccuracyScore]
+  const confidenceValues = [insightConfidenceValue, predictiveConfidence, dataFreshnessScore, demandAccuracyScore]
     .filter((v) => Number.isFinite(v) && v > 0);
   const overallAccuracy = confidenceValues.length
     ? Math.round(confidenceValues.reduce((s, v) => s + v, 0) / confidenceValues.length)
@@ -834,22 +1090,81 @@ async function getIntelligenceSummaryDocument() {
     kpis: kpiPayload,
     aiAccuracy: {
       overall: overallAccuracy,
-      insightConfidence: Math.round(avgInsightConfidence),
+      insightConfidence: insightConfidenceValue,
       predictiveConfidence,
       dataFreshness: dataFreshnessScore,
       demandBacktest: Math.round(demandAccuracyScore),
+      demandBacktestReady,
+      demandBacktestSamples: demandAccuracyTrend.length,
+      demandBacktestMinSamples: MIN_DEMAND_BACKTEST_SAMPLES,
       demandHitRate: Math.round(demandHitRatePct),
+      demandHitRate10: Math.round(demandHitRateStrictPct),
+      demandHitRate30: Math.round(demandHitRate30Pct),
       demandMape: Math.round(demandMapePct * 10) / 10,
+      demandMapeRaw: Math.round(demandMapeRawPct * 10) / 10,
+      demandMape30: Math.round(demandMape30Pct * 10) / 10,
+      demandOutlierDays,
+      demandBacktestSamples30,
+      demandMetricNote,
+      demandStatus,
+      demandStatusReason,
     },
     topRiskMachines: machineSnapshots.slice(0, 3),
     trendSummary: productionEnergyTrend,
   };
 
-  const narrative = await buildNarrativeWithQwen(qwenInput);
+  const highRiskCount = machineSnapshots.filter((m) => m.risk === "High").length;
+  const mediumRiskCount = machineSnapshots.filter((m) => m.risk === "Medium").length;
+  const operationalStatus = highRiskCount > 0 || rejectRateRaw > 6
+    ? "Action Needed"
+    : (mediumRiskCount > 0 || rejectRateRaw > 4 || Math.round(avgEfficiencyRaw) < 75 ? "Watch" : "Stable");
+
+  const topIssues = [];
+  if (highRiskCount > 0) topIssues.push(`High-risk machines detected: ${highRiskCount}`);
+  if (rejectRateRaw > 4) topIssues.push(`Reject rate elevated at ${Math.round(rejectRateRaw * 10) / 10}%`);
+  if (Math.round(avgEfficiencyRaw) < 75) topIssues.push(`Average efficiency below target at ${Math.round(avgEfficiencyRaw)}%`);
+  if ((demandStatus || "") === "Action Needed" || (demandStatus || "") === "Watch") {
+    topIssues.push(`Demand forecast status: ${demandStatus}`);
+  }
+
+  const reliabilityWindow = (demandAccuracyTrend || []).slice(-4);
+  const reliabilityStableDays = reliabilityWindow.filter((d) => toNum(d.errorPct, 100) <= 15).length;
+  const sustainedReliability = reliabilityWindow.length >= 3 && reliabilityStableDays >= 3;
+
+  const forecastReliable = Boolean(
+    demandBacktestReady &&
+    modelConsistencyScore >= 72 &&
+    demandStatus !== "Action Needed" &&
+    (demandStatus === "Stable" || sustainedReliability)
+  );
+  const forecastReliabilityLabel = forecastReliable ? "Reliable" : "Use with caution";
+  const reliabilityReasons = [];
+  if (!demandBacktestReady) {
+    reliabilityReasons.push(`Demand backtest is still calibrating (${demandBacktestSamples}/${MIN_DEMAND_BACKTEST_SAMPLES} samples).`);
+  }
+  if (modelConsistencyScore < 72) {
+    reliabilityReasons.push(`Model consistency is below reliability threshold (${modelConsistencyScore}% < 72%).`);
+  }
+  if (!sustainedReliability && demandStatus === "Watch") {
+    reliabilityReasons.push(`Recent reliability needs at least 3 stable days in the last 4 (${reliabilityStableDays}/${reliabilityWindow.length || 4}).`);
+  }
+  if (demandStatus === "Action Needed" && demandStatusReason) {
+    reliabilityReasons.push(demandStatusReason);
+  }
+  const reliabilityGateReason = reliabilityReasons.join(" ");
+  const combinedForecastWarning = [forecastQualityWarning, reliabilityGateReason]
+    .filter((x) => Boolean(x && String(x).trim()))
+    .join(" ");
+
+  const narrative = skipAiNarrative
+    ? buildFallbackNarrative(qwenInput)
+    : await buildNarrativeWithQwen(qwenInput);
 
   return {
     title: "Intelligence Summary Report",
     generatedAt: nowIso,
+    lastIngestionAt,
+    cacheTtlSeconds: Math.round(INTELLIGENCE_DOC_CACHE_TTL_MS / 1000),
     modelUsed: process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b",
     executiveSummary: narrative.executiveSummary,
     sectionSummaries: narrative.sectionSummaries,
@@ -868,12 +1183,53 @@ async function getIntelligenceSummaryDocument() {
     },
     aiAccuracy: {
       overall: overallAccuracy,
-      insightConfidence: Math.round(avgInsightConfidence),
+      insightConfidence: insightConfidenceValue,
+      insightConfidenceEstimated,
       predictiveConfidence,
       dataFreshness: dataFreshnessScore,
+      dataCompletenessPct,
+      missingIntervalsCount,
+      forecastQualityWarning: combinedForecastWarning,
+      forecastReliable,
+      forecastReliabilityLabel,
+      forecastReliabilityStableDays: reliabilityStableDays,
+      forecastReliabilityWindowDays: reliabilityWindow.length,
+      reliabilityGateReason,
+      confidenceBreakdown,
       demandBacktest: Math.round(demandAccuracyScore),
+      demandBacktestReady,
+      demandBacktestSamples: demandAccuracyTrend.length,
+      demandBacktestMinSamples: MIN_DEMAND_BACKTEST_SAMPLES,
       demandHitRate: Math.round(demandHitRatePct),
+      demandHitRate10: Math.round(demandHitRateStrictPct),
+      demandHitRateDelta,
       demandMape: Math.round(demandMapePct * 10) / 10,
+      demandMapeRaw: Math.round(demandMapeRawPct * 10) / 10,
+      demandHitRate30: Math.round(demandHitRate30Pct),
+      demandMape30: Math.round(demandMape30Pct * 10) / 10,
+      demandMapeDelta,
+      demandOutlierDays,
+      demandBacktestSamples30,
+      demandMetricNote,
+      demandStatus,
+      demandStatusReason,
+      metricProvenance: {
+        insightConfidence: insightConfidenceEstimated ? "Estimated" : "Measured",
+        predictiveConfidence: "Derived",
+        dataFreshness: "Derived",
+        dataCompletenessPct: "Derived",
+        demandBacktest: "Derived",
+        demandHitRate: "Derived",
+        demandMape: "Derived",
+        demandHitRate30: "Derived",
+        demandMape30: "Derived",
+        demandHitRateDelta: "Derived",
+        demandMapeDelta: "Derived",
+        demandOutlierDays: "Derived",
+        modelConsistency: "Derived",
+        demandStatus: "Derived",
+        forecastReliable: "Derived",
+      },
     },
     charts: {
       productionEnergyTrend,
@@ -884,3 +1240,6 @@ async function getIntelligenceSummaryDocument() {
 }
 
 module.exports = router;
+
+
+

@@ -25,6 +25,25 @@ interface ReportTableProps {
 
 const PAGE_SIZE = 10;
 
+function formatCellValue(value: unknown, key?: string): string {
+  const text = String(value ?? '');
+  if (!text) return '';
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(text)) return text;
+
+  const noFraction = text
+    .replace(/\.\d{1,6}Z$/, 'Z')
+    .replace(/\.\d{1,6}([+-]\d{2}:?\d{2})$/, '$1');
+
+  const m = noFraction.match(/^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2})(?:Z|[+-][0-9]{2}:?[0-9]{2})?$/);
+  if (!m) return noFraction;
+
+  const datePart = m[1];
+  const timePart = m[2];
+
+  // Keep second precision while removing ISO separators.
+  return `${datePart} ${timePart}`;
+}
+
 export default function ReportTable({ reportName, columns, data, disableExport = false }: ReportTableProps) {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<string | null>(null);
@@ -65,7 +84,7 @@ export default function ReportTable({ reportName, columns, data, disableExport =
   };
 
   const exportExcel = async () => {
-    const wsData = [columns.map(c => c.label), ...sorted.map(row => columns.map(c => row[c.key]))];
+    const wsData = [columns.map(c => c.label), ...sorted.map(row => columns.map(c => formatCellValue(row[c.key], c.key)))];
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Report');
     ws.addRows(wsData);
@@ -104,13 +123,13 @@ export default function ReportTable({ reportName, columns, data, disableExport =
       </div>
 
       <div className="rounded-md border">
-        <Table>
+        <Table className="table-fixed">
           <TableHeader>
             <TableRow>
               {columns.map(col => (
                 <TableHead
                   key={col.key}
-                  className="cursor-pointer select-none whitespace-nowrap"
+                  className="cursor-pointer select-none whitespace-normal break-words"
                   onClick={() => handleSort(col.key)}
                 >
                   <span className="inline-flex items-center gap-1">
@@ -132,8 +151,8 @@ export default function ReportTable({ reportName, columns, data, disableExport =
               paged.map((row, ri) => (
                 <TableRow key={ri}>
                   {columns.map(col => (
-                    <TableCell key={col.key} className="whitespace-nowrap">
-                      {String(row[col.key] ?? '')}
+                    <TableCell key={col.key} className="whitespace-normal break-words">
+                      {formatCellValue(row[col.key], col.key)}
                     </TableCell>
                   ))}
                 </TableRow>

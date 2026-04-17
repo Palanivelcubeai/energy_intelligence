@@ -231,10 +231,12 @@ def init_metric_insert_sql(conn):
     all_cols = BASE_METRIC_COLUMNS + INSERT_SIGNAL_COLUMNS
     placeholders = ", ".join(["%s"] * len(all_cols))
     INSERT_METRIC_SQL = f"""
-        INSERT INTO machine_metrics (
-            {", ".join(all_cols)}
-        ) VALUES (
-            {placeholders}
+        INSERT INTO machine_metrics ({", ".join(all_cols)})
+        SELECT {placeholders}
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM machine_metrics
+            WHERE machine_id = %s AND recorded_at = %s
         )
     """
 
@@ -486,7 +488,9 @@ def build_metric_values(machine_id, now_utc, reading, totals):
         "machine_vibration_mm_s": reading["vibration_mm_s"],
     }
 
-    return tuple(values[c] for c in (BASE_METRIC_COLUMNS + INSERT_SIGNAL_COLUMNS))
+    base_values = tuple(values[c] for c in (BASE_METRIC_COLUMNS + INSERT_SIGNAL_COLUMNS))
+    # Final 2 placeholders are for the NOT EXISTS duplication guard.
+    return base_values + (machine_id, now_utc)
 
 
 def fetch_daily_totals(cur, machine_id: str, day_start_utc: datetime):

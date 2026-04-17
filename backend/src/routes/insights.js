@@ -7,6 +7,7 @@ const severityRank = { critical: 4, warning: 3, info: 2, success: 1 };
 const insightsCache = new Map();
 const inflightInsights = new Map();
 let feedbackTableReady = false;
+let insightsTableReady = false;
 
 function getCacheTtlMs() {
   return Math.max(5000, toNum(process.env.INSIGHTS_CACHE_TTL_MS, 45000));
@@ -23,6 +24,174 @@ function getHttpTimeoutMs() {
 function toNum(value, fallback = 0) {
   const n = parseFloat(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function computeFreshnessScore(lastSeenAt) {
+  if (!lastSeenAt) return 40;
+  const ts = new Date(lastSeenAt).getTime();
+  if (!Number.isFinite(ts)) return 40;
+  const minutesOld = Math.max(0, (Date.now() - ts) / 60000);
+  return clamp(Math.round(100 - minutesOld * 1.5), 40, 99);
+}
+
+function computeDataQualityScore(machineNow) {
+  if (!machineNow) return 55;
+
+  const checks = [
+    machineNow.avg_efficiency,
+    machineNow.avg_pf,
+    machineNow.avg_heat,
+    machineNow.parts_today,
+    machineNow.kwh_today,
+    machineNow.reject_rate_pct,
+  ];
+
+  let valid = 0;
+  checks.forEach((v) => {
+    if (Number.isFinite(toNum(v, Number.NaN))) valid += 1;
+  });
+
+  const completeness = checks.length > 0 ? (valid / checks.length) * 100 : 0;
+  const noProductionPenalty = toNum(machineNow.parts_today, 0) <= 0 ? 10 : 0;
+  const noEnergyPenalty = toNum(machineNow.kwh_today, 0) <= 0 ? 8 : 0;
+
+  return clamp(Math.round(completeness - noProductionPenalty - noEnergyPenalty), 35, 99);
+}
+
+function computeConsistencyScore(insight, machineNow, baseline) {
+  let score = 65;
+  const causeTag = inferCauseTag(insight?.message || "");
+
+  if (hasNumericEvidence(insight)) score += 8;
+
+  if (!machineNow) return clamp(score, 40, 98);
+
+  const eff = toNum(machineNow.avg_efficiency, 0);
+  const pf = toNum(machineNow.avg_pf, 0);
+  const rejectRate = toNum(machineNow.reject_rate_pct, 0);
+  const heat = toNum(machineNow.avg_heat, 0);
+  const heatThreshold = toNum(machineNow.heat_threshold_c, 85);
+  const epp = toNum(machineNow.energy_per_part, 0);
+  const baselineEpp = toNum(baseline?.baseline_energy_per_part, 0);
+
+  if (causeTag === "reject_rate") {
+    if (rejectRate >= 7) score += 18;
+    else score -= 10;
+  } else if (causeTag === "efficiency") {
+    if (eff <= 80) score += 14;
+    else score -= 8;
+  } else if (causeTag === "power_factor") {
+    if (pf < 0.9) score += 14;
+    else score -= 8;
+  } else if (causeTag === "heat") {
+    if (heat >= heatThreshold - 2) score += 14;
+    else score -= 8;
+  } else if (causeTag === "energy") {
+    if (baselineEpp > 0 && epp > baselineEpp * 1.1) score += 14;
+    else if (epp > 0.25) score += 8;
+    else score -= 6;
+  }
+
+  return clamp(Math.round(score), 40, 98);
+}
+
+function computeOutcomeScore(feedbackAcceptedRate) {
+  if (!Number.isFinite(toNum(feedbackAcceptedRate, Number.NaN))) return 70;
+  return clamp(Math.round(toNum(feedbackAcceptedRate, 70)), 45, 98);
+}
+
+function calculateInsightConfidence(insight, machineNow, baseline, feedbackAcceptedRate) {
+  const dataQuality = computeDataQualityScore(machineNow);
+  const freshness = computeFreshnessScore(machineNow?.last_seen_at);
+  const consistency = computeConsistencyScore(insight, machineNow, baseline);
+  const modelCertainty = clamp(Math.round(toNum(insight?.confidence, 75)), 55, 99);
+  const outcome = computeOutcomeScore(feedbackAcceptedRate);
+
+  const weighted = (0.30 * dataQuality)
+    + (0.25 * freshness)
+    + (0.20 * consistency)
+    + (0.15 * modelCertainty)
+    + (0.10 * outcome);
+
+  return clamp(Math.round(weighted), 45, 99);
+}
+
+async function getFeedbackAcceptedRate30d() {
+  try {
+    await ensureInsightFeedbackTable();
+    const { rows } = await pool.query(
+      `SELECT COALESCE(ROUND((SUM(CASE WHEN vote = 1 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100, 1), 0) AS accepted_rate
+       FROM insight_feedback
+       WHERE created_at >= NOW() - INTERVAL '30 days'`
+    );
+    return toNum(rows?.[0]?.accepted_rate, 70);
+  } catch {
+    return 70;
+  }
+}
+
+async function ensureInsightsTable() {
+  if (insightsTableReady) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS insights (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      machine_id VARCHAR(20),
+      severity VARCHAR(20) NOT NULL CHECK (severity IN ('warning', 'critical', 'info', 'success')),
+      message TEXT NOT NULL,
+      financial_impact VARCHAR(255),
+      production_impact TEXT,
+      confidence_pct INT CHECK (confidence_pct BETWEEN 0 AND 100),
+      suggested_action TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_insights_created_at ON insights (created_at DESC)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_insights_severity_time ON insights (severity, created_at DESC)");
+
+  insightsTableReady = true;
+}
+
+async function persistInsightsBatch(insights) {
+  const items = Array.isArray(insights) ? insights : [];
+  if (items.length === 0) return;
+
+  try {
+    await ensureInsightsTable();
+    await Promise.all(items.map((item) => {
+      const machineId = item.machine == null ? null : String(item.machine);
+      const severity = ["critical", "warning", "info", "success"].includes(item.severity) ? item.severity : "info";
+      const confidence = clamp(Math.round(toNum(item.confidence, 75)), 0, 100);
+      return pool.query(
+        `INSERT INTO insights (machine_id, severity, message, financial_impact, production_impact, confidence_pct, suggested_action)
+         SELECT $1::varchar, $2::varchar, $3::text, $4::varchar, $5::text, $6::int, $7::text
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM insights
+           WHERE machine_id IS NOT DISTINCT FROM $1::varchar
+             AND message = $3::text
+             AND created_at >= NOW() - INTERVAL '6 hours'
+         )`,
+        [
+          machineId,
+          severity,
+          String(item.message || '').trim(),
+          String(item.financial_impact || '').trim(),
+          String(item.production_impact || '').trim(),
+          confidence,
+          String(item.suggested_action || '').trim(),
+        ]
+      );
+    }));
+  } catch (err) {
+    if (!(err && (err.code === "42P01" || err.code === "42703"))) {
+      console.warn("persistInsightsBatch warning:", err.message || err);
+    }
+  }
 }
 
 async function ensureInsightFeedbackTable() {
@@ -568,7 +737,8 @@ async function getPlantSnapshot() {
        COALESCE(ROUND(AVG(mm.machine_vibration_mm_s)::numeric, 2), 0) AS avg_vibration,
        COALESCE(MAX(mm.kwh), 0) AS kwh_today,
        COALESCE(MAX(mm.parts_produced), 0) AS parts_today,
-       COALESCE(MAX(mm.rejection_count), 0) AS rejects_today
+       COALESCE(MAX(mm.rejection_count), 0) AS rejects_today,
+       MAX(mm.recorded_at) AS last_seen_at
      FROM machines m
      LEFT JOIN machine_metrics mm
        ON mm.machine_id = m.id
@@ -597,6 +767,7 @@ async function getPlantSnapshot() {
       energy_per_part: partsToday > 0 ? Math.round((kwhToday / partsToday) * 1000) / 1000 : 0,
       rejects_today: rejects,
       reject_rate_pct: rejectRatePct,
+      last_seen_at: r.last_seen_at,
     };
   });
 }
@@ -971,16 +1142,21 @@ async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {})
   }
 
   const snapshotByMachine = new Map(snapshot.map((m) => [m.id, m]));
+  const feedbackAcceptedRate = await getFeedbackAcceptedRate30d();
+  const baselinesByMachine = historical?.machine_baselines || {};
 
   const finalInsights = [...prioritized, ...leftovers]
     .map((item, index) => {
       const causeTag = inferCauseTag(item.message);
       const machineNow = item.machine ? snapshotByMachine.get(item.machine) : null;
+      const baseline = item.machine ? (baselinesByMachine[item.machine] || null) : null;
       const immediateAction = buildImmediateAction(causeTag, item.machine, machineNow) || item.suggested_action;
       const preventiveAction = buildPreventiveAction(causeTag, item.machine);
+      const confidence = calculateInsightConfidence(item, machineNow, baseline, feedbackAcceptedRate);
       return {
         ...item,
         id: `ai-${index + 1}-${item.machine || "all"}`,
+        confidence,
         suggested_action: immediateAction,
         suggested_actions: [immediateAction, preventiveAction],
       };
@@ -991,6 +1167,7 @@ async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {})
 
 async function generateSimpleAiInsights(limit = 2) {
   const snapshot = await getPlantSnapshot();
+  const feedbackAcceptedRate = await getFeedbackAcceptedRate30d();
   const knownMachineIds = new Set(snapshot.map((m) => m.id));
   const models = getInsightModels();
   const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
@@ -1067,7 +1244,14 @@ async function generateSimpleAiInsights(limit = 2) {
           .map((item, index) => ({
             ...item,
             id: `ai-${index + 1}-${item.machine || "all"}`,
-          }));
+          }))
+          .map((item) => {
+            const machineNow = item.machine ? snapshot.find((m) => m.id === item.machine) : null;
+            return {
+              ...item,
+              confidence: calculateInsightConfidence(item, machineNow, null, feedbackAcceptedRate),
+            };
+          });
 
         if (toppedUp.length > 0) return toppedUp;
       }
@@ -1098,7 +1282,14 @@ async function generateSimpleAiInsights(limit = 2) {
           .map((item, index) => ({
             ...item,
             id: `ai-${index + 1}-${item.machine || "all"}`,
-          }));
+          }))
+          .map((item) => {
+            const machineNow = item.machine ? snapshot.find((m) => m.id === item.machine) : null;
+            return {
+              ...item,
+              confidence: calculateInsightConfidence(item, machineNow, null, feedbackAcceptedRate),
+            };
+          });
       }
   }
 
@@ -1114,6 +1305,7 @@ function refreshAiCache(cacheKey, limit, mode = "quality", options = {}) {
 
   const refreshPromise = (async () => {
     const ai = await generateLlamaInsightsWithMode(limit, mode, options);
+    await persistInsightsBatch(ai);
     insightsCache.set(cacheKey, { data: ai, createdAt: Date.now() });
     return ai;
   })().finally(() => {
@@ -1287,15 +1479,18 @@ async function generateInsights(limit) {
         }),
       ]);
 
+      await persistInsightsBatch(bootstrap);
       insightsCache.set(cacheKey, { data: bootstrap, createdAt: Date.now() });
       return bootstrap;
     } catch (bootstrapErr) {
       try {
         const partial = await generateLlamaInsightsWithMode(limit, "fast", { allowPartial: true });
+        await persistInsightsBatch(partial);
         insightsCache.set(cacheKey, { data: partial, createdAt: Date.now() });
         return partial;
       } catch (partialErr) {
         const simpleAi = await generateSimpleAiInsights(limit || 2);
+        await persistInsightsBatch(simpleAi);
         insightsCache.set(cacheKey, { data: simpleAi, createdAt: Date.now() });
         return simpleAi;
       }
@@ -1324,6 +1519,7 @@ async function generateInsightsFastEndpoint(limit) {
       }),
     ]);
 
+    await persistInsightsBatch(quickAi);
     insightsCache.set(cacheKey, { data: quickAi, createdAt: Date.now() });
     return quickAi;
   } catch (err) {
@@ -1366,10 +1562,12 @@ router.get("/all", async (_req, res) => {
     } catch (retryErr) {
       try {
         const simple = await runWithTimeout(generateSimpleAiInsights(4), simpleMs, "insights simple");
+        await persistInsightsBatch(simple);
         return res.json(simple);
       } catch (simpleErr) {
         try {
           const ruleBased = await generateRuleBasedInsights(4);
+          await persistInsightsBatch(ruleBased);
           return res.json(ruleBased);
         } catch (ruleErr) {
           console.warn("GET /insights/all fallback failed:", ruleErr?.message || simpleErr?.message || retryErr?.message || retryErr);
@@ -1396,10 +1594,12 @@ router.get("/top", async (_req, res) => {
     } catch (retryErr) {
       try {
         const simple = await runWithTimeout(generateSimpleAiInsights(4), simpleMs, "insights top simple");
+        await persistInsightsBatch(simple);
         return res.json(simple);
       } catch (simpleErr) {
         try {
           const ruleBased = await generateRuleBasedInsights(4);
+          await persistInsightsBatch(ruleBased);
           return res.json(ruleBased);
         } catch (ruleErr) {
           console.warn("GET /insights/top fallback failed:", ruleErr?.message || simpleErr?.message || retryErr?.message || retryErr);
