@@ -82,6 +82,22 @@ function persistReportCachesToSessionStorage() {
   } catch {}
 }
 
+function formatModelName(modelUsed: string) {
+  const raw = String(modelUsed || '').trim().toLowerCase();
+  if (!raw) return 'Unknown';
+  if (raw.includes('gemma-4')) return 'Gemma 4';
+  if (raw.includes('qwen2.5')) return 'Qwen 2.5';
+  if (raw.includes('deepseek')) return 'DeepSeek';
+
+  const withoutProvider = raw.includes('/') ? raw.split('/').pop() || raw : raw;
+  return withoutProvider
+    .replace(/:free$/i, '')
+    .replace(/-it$/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (m) => m.toUpperCase())
+    .trim();
+}
+
 const reportColumns: Record<string, { key: string; label: string }[]> = {
   daily_cnc_energy: [
     { key: 'date', label: 'Date' }, { key: 'machine', label: 'CNC Machine' },
@@ -231,15 +247,20 @@ export default function Reports() {
 
     let cancelled = false;
     let intelligenceRefreshTimer: number | null = null;
+    const tabularReports = orderedReports.filter((r) => r.key !== 'intelligence_summary');
     const dataCacheFresh = Date.now() - reportDataCacheAt <= REPORT_CACHE_TTL_MS;
     const intelligenceCacheFresh = Date.now() - intelligenceDocCacheAt <= REPORT_CACHE_TTL_MS;
-    const cacheHasAllReports = orderedReports.every((r) => Array.isArray(reportDataCache[r.key]));
+    const cacheHasAllReports = tabularReports.every((r) => Array.isArray(reportDataCache[r.key]));
     const shouldFetchReportData = !dataCacheFresh || !cacheHasAllReports;
     const shouldFetchIntelligence = !intelligenceCacheFresh;
 
     // Show loading only if a report has no cached rows at all.
     const nextLoading: Record<string, boolean> = {};
     orderedReports.forEach((r) => {
+      if (r.key === 'intelligence_summary') {
+        nextLoading[r.key] = false;
+        return;
+      }
       const hasCachedData = Array.isArray(reportDataCache[r.key]);
       const hasLocalData = Array.isArray(reportData[r.key]);
       nextLoading[r.key] = shouldFetchReportData && !hasCachedData && !hasLocalData;
@@ -262,7 +283,7 @@ export default function Reports() {
 
     if (shouldFetchReportData) {
       Promise.all(
-        orderedReports.map(async (report) => {
+        tabularReports.map(async (report) => {
           try {
             const { data } = await apiClient.get(`/reports/${report.key}/data`);
             return { key: report.key, data: Array.isArray(data) ? data : [] };
@@ -638,7 +659,7 @@ export default function Reports() {
       doc.setFontSize(12);
       doc.text(`Generated: ${new Date(exportDoc.generatedAt).toLocaleString()}`, leftMargin, y);
       y += 5;
-      doc.text(`Model: ${exportDoc.modelUsed}`, leftMargin, y);
+      doc.text(`Model: ${formatModelName(exportDoc.modelUsed)}`, leftMargin, y);
       y += 8;
 
       writeSubHeading('Executive Summary');

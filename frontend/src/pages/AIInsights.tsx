@@ -4,7 +4,7 @@ import { apiClient } from "@/services/apiClient";
 import type { InsightData } from "@/types";
 import { InsightCard } from "@/components/InsightCard";
 import { EmptyState } from "@/components/EmptyState";
-import { Brain, Lightbulb, Target, Bot, User, Send, MessageCircle, X } from "lucide-react";
+import { Brain, Lightbulb, Target, Bot, User, Send, MessageCircle, X, TrendingUp, Sparkles } from "lucide-react";
 
 type ChatAssistResponse = {
   answer: string;
@@ -25,6 +25,20 @@ type DataQualityStatus = {
   stale_machines: string[];
   invalid_rate_pct: number;
   status: "healthy" | "warning";
+};
+
+type InsightsMetaResponse = {
+  provider?: string;
+  model?: string;
+  updatedAt?: string | null;
+};
+
+type AIPlanData = {
+  suggestions: string[];
+  recommendations: string[];
+  predictions: string[];
+  ideas: string[];
+  provider?: string;
 };
 
 const CHAT_HISTORY_STORAGE_KEY = "ai-insights-chat-history-v1";
@@ -199,6 +213,52 @@ function buildEmergencyInsightsFromRealtime(rows: any[]): InsightData[] {
   return fallback.slice(0, 4);
 }
 
+function normalizePlanItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const cleaned = value
+    .filter((item) => typeof item === "string" && item.trim())
+    .map((item) => item.trim());
+  return Array.from(new Set(cleaned)).slice(0, 4);
+}
+
+function buildFallbackPlanFromInsights(insights: InsightData[]): AIPlanData {
+  const suggestions = Array.from(
+    new Set(
+      insights
+        .flatMap((i) => [
+          i.suggested_action?.trim(),
+          ...(Array.isArray(i.suggested_actions) ? i.suggested_actions.map((s) => s?.trim()) : []),
+        ])
+        .filter((value): value is string => Boolean(value))
+    )
+  ).slice(0, 4);
+
+  const recommendations = insights
+    .slice(0, 4)
+    .map((i) => i.production_impact?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  const predictions = insights
+    .slice(0, 4)
+    .map((i) => i.financial_impact?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  const ideas = [
+    "Run a weekly AI review with top 3 machine anomalies and closure owners.",
+    "Pilot an operator checklist for the highest reject machine each shift.",
+    "Track kWh per accepted part as a shift-level optimization KPI.",
+    "Pair maintenance triggers with reject and heat trend thresholds.",
+  ];
+
+  return {
+    suggestions,
+    recommendations,
+    predictions,
+    ideas,
+    provider: "fallback",
+  };
+}
+
 export default function AIInsights() {
   const [insights, setInsights] = useState<InsightData[]>(() => loadCachedInsights());
   const [loading, setLoading] = useState(() => loadCachedInsights().length === 0);
@@ -209,7 +269,10 @@ export default function AIInsights() {
   const [isStreamingResponse, setIsStreamingResponse] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => loadChatHistory());
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [insightsModelLabel, setInsightsModelLabel] = useState<string>("");
   const [dataQuality, setDataQuality] = useState<DataQualityStatus | null>(null);
+  const [aiPlan, setAiPlan] = useState<AIPlanData>(() => buildFallbackPlanFromInsights(loadCachedInsights()));
+  const [aiPlanLoading, setAiPlanLoading] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const hasInsightsRef = useRef(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -221,6 +284,45 @@ export default function AIInsights() {
     }
   }, [insights]);
 
+  useEffect(() => {
+    let active = true;
+
+    const toProviderLabel = (provider?: string) => {
+      const p = String(provider || "").trim().toLowerCase();
+      if (p === "ollama") return "Ollama";
+      return p ? p : "AI";
+    };
+
+    const fetchInsightsMeta = async () => {
+      try {
+        const response = await withTimeout(
+          apiClient.get<InsightsMetaResponse>("/insights/meta", { timeout: 6000 }),
+          7000,
+          "insights meta"
+        );
+        if (!active) return;
+
+        const provider = toProviderLabel(response.data?.provider);
+        const model = String(response.data?.model || "").trim();
+        if (model) {
+          setInsightsModelLabel(`${provider} - ${model}`);
+        }
+      } catch {
+        // Keep previous model label on transient failures.
+      }
+    };
+
+    void fetchInsightsMeta();
+    const interval = setInterval(() => {
+      void fetchInsightsMeta();
+    }, 15000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   const suggestions = Array.from(
     new Set(
       insights
@@ -231,6 +333,60 @@ export default function AIInsights() {
         .filter((value): value is string => Boolean(value))
     )
   ).slice(0, 6);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadAiPlan = async () => {
+      setAiPlanLoading(true);
+      try {
+        const response = await withTimeout(
+          apiClient.post("/chat-assist/strategy", {
+            goal: "Improve production quality, reduce rejects, and optimize energy usage",
+            horizonDays: 7,
+          }, { timeout: 9000 }),
+          10000,
+          "ai strategy"
+        );
+
+        if (!active) return;
+        const payload = response?.data || {};
+        const nextPlan: AIPlanData = {
+          suggestions: normalizePlanItems(payload?.suggestions),
+          recommendations: normalizePlanItems(payload?.recommendations),
+          predictions: normalizePlanItems(payload?.predictions),
+          ideas: normalizePlanItems(payload?.ideas),
+          provider: typeof payload?.provider === "string" ? payload.provider : undefined,
+        };
+
+        if (
+          nextPlan.suggestions.length ||
+          nextPlan.recommendations.length ||
+          nextPlan.predictions.length ||
+          nextPlan.ideas.length
+        ) {
+          setAiPlan(nextPlan);
+        } else {
+          setAiPlan(buildFallbackPlanFromInsights(insights));
+        }
+      } catch {
+        if (!active) return;
+        setAiPlan(buildFallbackPlanFromInsights(insights));
+      } finally {
+        if (active) setAiPlanLoading(false);
+      }
+    };
+
+    void loadAiPlan();
+    const interval = setInterval(() => {
+      void loadAiPlan();
+    }, 30000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [insights]);
 
   useEffect(() => {
     let active = true;
@@ -557,6 +713,9 @@ export default function AIInsights() {
         <div>
           <h1 className="text-2xl font-bold text-foreground">AI Insights</h1>
           <p className="text-sm text-muted-foreground">Smart recommendations and insights for your plant operations</p>
+          {insightsModelLabel && (
+            <p className="text-xs text-muted-foreground">Model: {insightsModelLabel}</p>
+          )}
         </div>
       </div>
 
@@ -724,23 +883,83 @@ export default function AIInsights() {
             </div>
           )}
 
-          <div className="rounded-xl border border-border/60 bg-card/50 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Lightbulb className="h-4 w-4 text-primary" />
-              <h2 className="text-sm font-semibold text-foreground">AI Suggestions</h2>
+          <div className="rounded-xl border border-border/60 bg-card/50 p-4 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Lightbulb className="h-4 w-4 text-primary" />
+                <h2 className="text-sm font-semibold text-foreground">AI Strategy Board</h2>
+              </div>
+              {aiPlanLoading && (
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Refreshing</p>
+              )}
             </div>
 
-            {suggestions.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {suggestions.map((tip, index) => (
-                  <div key={`${index}-${tip}`} className="rounded-lg bg-secondary/40 px-3 py-2 text-sm text-foreground flex items-start gap-2">
-                    <Target className="h-4 w-4 mt-0.5 text-primary shrink-0" />
-                    <span>{tip}</span>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-border/60 bg-secondary/20 p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <Target className="h-4 w-4 text-primary" /> Suggestions
+                </div>
+                {aiPlan.suggestions.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {aiPlan.suggestions.map((tip, index) => (
+                      <p key={`${index}-${tip}`} className="text-sm text-foreground">• {tip}</p>
+                    ))}
                   </div>
-                ))}
+                ) : (
+                  <p className="text-sm text-muted-foreground">No suggestions available.</p>
+                )}
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">No suggestions available from current AI response.</p>
+
+              <div className="rounded-lg border border-border/60 bg-secondary/20 p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <Lightbulb className="h-4 w-4 text-primary" /> Recommendations
+                </div>
+                {aiPlan.recommendations.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {aiPlan.recommendations.map((tip, index) => (
+                      <p key={`${index}-${tip}`} className="text-sm text-foreground">• {tip}</p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No recommendations available.</p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-border/60 bg-secondary/20 p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <TrendingUp className="h-4 w-4 text-primary" /> Predictions
+                </div>
+                {aiPlan.predictions.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {aiPlan.predictions.map((tip, index) => (
+                      <p key={`${index}-${tip}`} className="text-sm text-foreground">• {tip}</p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No predictions available.</p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-border/60 bg-secondary/20 p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <Sparkles className="h-4 w-4 text-primary" /> Ideas
+                </div>
+                {aiPlan.ideas.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {aiPlan.ideas.map((tip, index) => (
+                      <p key={`${index}-${tip}`} className="text-sm text-foreground">• {tip}</p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No ideas available.</p>
+                )}
+              </div>
+            </div>
+
+            {!aiPlanLoading && aiPlan.suggestions.length === 0 && suggestions.length > 0 && (
+              <div className="rounded-lg bg-secondary/40 px-3 py-2 text-sm text-foreground">
+                Fallback suggestions: {suggestions.join(" | ")}
+              </div>
             )}
           </div>
 

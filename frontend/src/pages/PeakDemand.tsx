@@ -20,6 +20,7 @@ interface AIPrediction {
 }
 
 export default function PeakDemand() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [data, setData] = useState<DemandPoint[]>([]);
   const [peakEvents, setPeakEvents] = useState<PeakEvent[]>([]);
   const [contractDemand, setContractDemand] = useState<number>(85);
@@ -71,9 +72,73 @@ export default function PeakDemand() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
+  }, []);
+
   const maxDemand = data.length ? Math.max(...data.map(d => d.demand)) : 0;
   const currentDemand = data.length ? data[data.length - 1].demand : 0;
   const predictedPeak = aiPrediction?.predicted_kva ?? 0;
+
+  const contractAi = !aiModeEnabled
+    ? undefined
+    : {
+        type: "Idea" as const,
+        text: "Use contract demand as scheduling guardrail to prevent avoidable penalty events.",
+      };
+
+  const currentAi = !aiModeEnabled
+    ? undefined
+    : currentDemand > contractDemand
+      ? {
+          type: "Recommendation" as const,
+          text: "Current demand exceeds contract. Trigger staged load control on non-critical loads immediately.",
+        }
+      : {
+          type: "Prediction" as const,
+          text: "Current demand is within safe band. Immediate contract breach risk is low.",
+        };
+
+  const maxAi = !aiModeEnabled
+    ? undefined
+    : maxDemand > contractDemand
+      ? {
+          type: "Suggestion" as const,
+          text: "Monthly max crossed contract. Review peak event windows and stagger large load operations.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Monthly max remains below contract. Maintain current demand discipline.",
+        };
+
+  const predictedAi = !aiModeEnabled
+    ? undefined
+    : aiPrediction
+      ? {
+          type: "Prediction" as const,
+          text: predictedPeak > contractDemand
+            ? "AI forecasts potential contract breach. Pre-emptive load shifting is recommended."
+            : "AI forecast indicates controlled peak. Continue current operating strategy.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "AI prediction unavailable currently. Use trend and peak events for manual risk watch.",
+        };
 
   return (
     <div className="space-y-6">
@@ -83,9 +148,9 @@ export default function PeakDemand() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KPICard title="Contract Demand" value={contractDemand.toString()} unit="kVA" icon={<Zap className="h-4 w-4" />} />
-        <KPICard title="Current Demand" value={currentDemand.toFixed(1)} unit="kVA" variant={currentDemand > contractDemand ? 'destructive' : 'primary'} />
-        <KPICard title="Max This Month" value={maxDemand.toFixed(1)} unit="kVA" icon={<TrendingUp className="h-4 w-4" />} variant={maxDemand > contractDemand ? 'warning' : 'success'} />
+        <KPICard title="Contract Demand" value={contractDemand.toString()} unit="kVA" icon={<Zap className="h-4 w-4" />} aiInsight={contractAi} />
+        <KPICard title="Current Demand" value={currentDemand.toFixed(1)} unit="kVA" variant={currentDemand > contractDemand ? 'destructive' : 'primary'} aiInsight={currentAi} />
+        <KPICard title="Max This Month" value={maxDemand.toFixed(1)} unit="kVA" icon={<TrendingUp className="h-4 w-4" />} variant={maxDemand > contractDemand ? 'warning' : 'success'} aiInsight={maxAi} />
         <KPICard
           title="AI Predicted Peak"
           value={aiPrediction ? predictedPeak.toFixed(1) : "--"}
@@ -95,6 +160,7 @@ export default function PeakDemand() {
             : "AI prediction unavailable"}
           icon={<Brain className="h-4 w-4" />}
           variant={aiPrediction ? (predictedPeak > contractDemand ? 'warning' : 'success') : 'default'}
+          aiInsight={predictedAi}
         />
       </div>
 

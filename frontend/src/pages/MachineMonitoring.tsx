@@ -13,6 +13,7 @@ import {
 const tt = { contentStyle: { backgroundColor: '#ffffff', border: '1px solid hsl(215, 20%, 80%)', borderRadius: '8px', color: '#1a1a2e', fontSize: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }, itemStyle: { color: '#1a1a2e' }, labelStyle: { color: '#1a1a2e', fontWeight: 600 } };
 
 export default function MachineMonitoring() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [trend, setTrend] = useState<{ time: string; value: number }[]>([]);
@@ -60,9 +61,78 @@ export default function MachineMonitoring() {
     return () => clearInterval(interval);
   }, [selected]);
 
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
+  }, []);
+
   const machine = machines.find(m => m.id === selected);
 
   if (machine) {
+    const powerAi = !aiModeEnabled
+      ? undefined
+      : machine.kW > 20
+        ? {
+            type: "Suggestion" as const,
+            text: "Current power is high. Check load smoothing and non-productive runtime to reduce energy spikes.",
+          }
+        : {
+            type: "Prediction" as const,
+            text: "Power draw is within normal range. Efficiency should remain stable if process state is unchanged.",
+          };
+
+    const energyAi = !aiModeEnabled
+      ? undefined
+      : {
+          type: "Recommendation" as const,
+          text: "Track energy trend with output for this machine to identify avoidable per-part consumption.",
+        };
+
+    const partsAi = !aiModeEnabled
+      ? undefined
+      : machine.parts_produced > 0
+        ? {
+            type: "Prediction" as const,
+            text: "Parts trend is active. Sustained uptime can improve daily throughput target attainment.",
+          }
+        : {
+            type: "Suggestion" as const,
+            text: "No parts recorded recently. Validate machine state, program start, and setup readiness.",
+          };
+
+    const runtimeAi = !aiModeEnabled
+      ? undefined
+      : {
+          type: "Idea" as const,
+          text: "Compare runtime and idle split to improve scheduling discipline for this machine.",
+        };
+
+    const efficiencyAi = !aiModeEnabled
+      ? undefined
+      : machine.efficiency_score >= 85
+        ? {
+            type: "Recommendation" as const,
+            text: "Efficiency is strong. Use this configuration as benchmark for similar product runs.",
+          }
+        : {
+            type: "Suggestion" as const,
+            text: "Efficiency is below preferred band. Review feed, speed, and tool condition.",
+          };
+
     const runtimeData = [
       { name: 'Runtime', value: machine.runtime_hours },
       { name: 'Idle', value: machine.idle_hours },
@@ -81,11 +151,11 @@ export default function MachineMonitoring() {
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <KPICard title="Current Power" value={machine.kW} unit="kW" icon={<Zap className="h-4 w-4" />} variant="primary" />
-          <KPICard title="Energy Today" value={machine.kWh} unit="kWh" />
-          <KPICard title="Parts Today" value={machine.parts_produced} icon={<Package className="h-4 w-4" />} />
-          <KPICard title="Runtime" value={machine.runtime_hours} unit="hrs" icon={<Clock className="h-4 w-4" />} />
-          <KPICard title="Efficiency" value={machine.efficiency_score} unit="/100" icon={<Gauge className="h-4 w-4" />} variant={machine.efficiency_score >= 85 ? 'success' : 'warning'} />
+          <KPICard title="Current Power" value={machine.kW} unit="kW" icon={<Zap className="h-4 w-4" />} variant="primary" aiInsight={powerAi} />
+          <KPICard title="Energy Today" value={machine.kWh} unit="kWh" aiInsight={energyAi} />
+          <KPICard title="Parts Today" value={machine.parts_produced} icon={<Package className="h-4 w-4" />} aiInsight={partsAi} />
+          <KPICard title="Runtime" value={machine.runtime_hours} unit="hrs" icon={<Clock className="h-4 w-4" />} aiInsight={runtimeAi} />
+          <KPICard title="Efficiency" value={machine.efficiency_score} unit="/100" icon={<Gauge className="h-4 w-4" />} variant={machine.efficiency_score >= 85 ? 'success' : 'warning'} aiInsight={efficiencyAi} />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

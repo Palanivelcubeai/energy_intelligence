@@ -134,6 +134,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 
 export default function Overview() {
   const cachedInsights = readOverviewInsightsCache();
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [loadCurve, setLoadCurve] = useState<{ time: string; value: number }[]>([]);
   const [prodTrend, setProdTrend] = useState<{ time: string; production: number; energy: number }[]>([]);
@@ -224,10 +225,86 @@ export default function Overview() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
+  }, []);
+
   const totalEnergy = machines.reduce((s, m) => s + m.kWh, 0);
   const totalParts = machines.reduce((s, m) => s + m.parts_produced, 0);
   const totalLoad = machines.reduce((s, m) => s + m.kW, 0);
+  const avgEnergyPerPart = totalParts > 0 && Number.isFinite(totalEnergy / totalParts)
+    ? (totalEnergy / totalParts)
+    : 0;
   const pieData = machines.map(m => ({ name: m.id, value: m.kWh }));
+
+  const energyDelta = dailyComparison?.energy.percentChange ?? 0;
+  const partsDelta = dailyComparison?.parts.percentChange ?? 0;
+  const energyPerPartDelta = dailyComparison?.energyPerPart.percentChange ?? 0;
+  const costDelta = dailyComparison?.cost.percentChange ?? 0;
+
+  const energyAiInsight = !aiModeEnabled
+    ? undefined
+    : energyDelta < 0
+      ? {
+          type: "Prediction" as const,
+          text: "Energy is trending down vs yesterday. If this pattern holds for next shift, daily cost is likely to reduce further.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Energy is up vs yesterday. Prioritize idle-time reduction and high-load machine checks to contain energy drift.",
+        };
+
+  const partsAiInsight = !aiModeEnabled
+    ? undefined
+    : partsDelta >= 0
+      ? {
+          type: "Recommendation" as const,
+          text: "Production trend is positive. Maintain current setup discipline and monitor reject spikes to protect throughput gains.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Parts output is lower vs yesterday. Focus on bottleneck machine cycle-time and downtime causes in current shift.",
+        };
+
+  const energyPerPartAiInsight = !aiModeEnabled
+    ? undefined
+    : energyPerPartDelta < 0
+      ? {
+          type: "Prediction" as const,
+          text: "Energy per part is improving. Sustained reject control can further improve energy intensity this cycle.",
+        }
+      : {
+          type: "Recommendation" as const,
+          text: "Energy per part is worsening. Review power-per-part on low-yield machines and optimize feed/speed profile.",
+        };
+
+  const costAiInsight = !aiModeEnabled
+    ? undefined
+    : costDelta < 0
+      ? {
+          type: "Idea" as const,
+          text: "Cost trend is favorable. Capture this window as a benchmark and replicate best-performing machine settings.",
+        }
+      : {
+          type: "Recommendation" as const,
+          text: "Cost is trending up. Apply tariff-window aware scheduling and cut idle-loss contributors first.",
+        };
 
   return (
     <div className="space-y-6">
@@ -244,20 +321,23 @@ export default function Overview() {
           unit="kWh" 
           icon={<Zap className="h-4 w-4" />} 
           variant="primary" 
-          trend={dailyComparison ? { value: dailyComparison.energy.percentChange, label: 'vs yesterday' } : undefined} 
+          trend={dailyComparison ? { value: dailyComparison.energy.percentChange, label: 'vs yesterday' } : undefined}
+          aiInsight={energyAiInsight}
         />
         <KPICard 
           title="Parts Produced" 
           value={totalParts} 
           icon={<Package className="h-4 w-4" />} 
-          trend={dailyComparison ? { value: dailyComparison.parts.percentChange, label: 'vs yesterday' } : undefined} 
+          trend={dailyComparison ? { value: dailyComparison.parts.percentChange, label: 'vs yesterday' } : undefined}
+          aiInsight={partsAiInsight}
         />
         <KPICard 
           title="Avg Energy/Part" 
-          value={(totalEnergy / totalParts).toFixed(2)} 
+          value={avgEnergyPerPart.toFixed(2)} 
           unit="kWh" 
           icon={<Gauge className="h-4 w-4" />} 
-          trend={dailyComparison ? { value: dailyComparison.energyPerPart.percentChange, label: 'improvement' } : undefined} 
+          trend={dailyComparison ? { value: dailyComparison.energyPerPart.percentChange, label: 'improvement' } : undefined}
+          aiInsight={energyPerPartAiInsight}
         />
         <KPICard title="Current Load" value={totalLoad.toFixed(1)} unit="kW" icon={<Activity className="h-4 w-4" />} variant="primary" />
         <KPICard title="Max Demand" value={kpis.maxDemand.toFixed(1)} unit="kVA" icon={<TrendingUp className="h-4 w-4" />} variant="warning" />
@@ -267,6 +347,7 @@ export default function Overview() {
           value={`₹${(totalEnergy * 8.5).toFixed(0)}`}
           icon={<IndianRupee className="h-4 w-4" />}
           trend={dailyComparison ? { value: dailyComparison.cost.percentChange, label: 'vs yesterday' } : undefined}
+          aiInsight={costAiInsight}
         />
         <KPICard title="Plant Efficiency" value={kpis.avgEfficiency} unit="/100" icon={<BarChart3 className="h-4 w-4" />} variant="success" />
       </div>

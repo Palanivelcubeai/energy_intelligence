@@ -24,6 +24,7 @@ interface AggRow {
 }
 
 export default function EnergyVsOutput() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [from, setFrom] = useState(() => startOfDay(subDays(new Date(), 6)));
   const [to, setTo] = useState(() => endOfDay(new Date()));
   const [loading, setLoading] = useState(false);
@@ -48,6 +49,25 @@ export default function EnergyVsOutput() {
     return () => clearInterval(interval);
   }, [from, to]);
 
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
+  }, []);
+
   const handleDateChange = (f: Date, t: Date) => {
     setFrom(f);
     setTo(t);
@@ -59,6 +79,34 @@ export default function EnergyVsOutput() {
   const worst = data.length ? data.reduce((a, b) => a.energy_per_part > b.energy_per_part ? a : b) : null;
 
   const ranking = [...data].sort((a, b) => a.energy_per_part - b.energy_per_part);
+
+  const bestAi = !aiModeEnabled || !best
+    ? undefined
+    : {
+        type: "Recommendation" as const,
+        text: `${best.name} is currently best performer. Use it as benchmark for parameter replication across lower-ranked machines.`,
+      };
+
+  const bestMetricAi = !aiModeEnabled || !best
+    ? undefined
+    : {
+        type: "Prediction" as const,
+        text: "If quality yield remains stable, best kWh/part can be sustained through this reporting window.",
+      };
+
+  const worstAi = !aiModeEnabled || !worst
+    ? undefined
+    : {
+        type: "Suggestion" as const,
+        text: `${worst.name} needs focused review for cycle-time and idle-load inefficiencies to reduce energy intensity.`,
+      };
+
+  const worstMetricAi = !aiModeEnabled || !worst
+    ? undefined
+    : {
+        type: "Idea" as const,
+        text: "Run side-by-side comparison of best vs worst machine setup to isolate avoidable energy losses.",
+      };
 
   return (
     <div className="space-y-6">
@@ -74,10 +122,10 @@ export default function EnergyVsOutput() {
       ) : (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <KPICard title="Best Machine" value={best!.name} icon={<Award className="h-4 w-4" />} variant="success" />
-            <KPICard title="Best kWh/Part" value={best!.energy_per_part} unit="kWh" variant="success" />
-            <KPICard title="Worst Machine" value={worst!.name} icon={<TrendingDown className="h-4 w-4" />} variant="warning" />
-            <KPICard title="Worst kWh/Part" value={worst!.energy_per_part} unit="kWh" variant="warning" />
+            <KPICard title="Best Machine" value={best!.name} icon={<Award className="h-4 w-4" />} variant="success" aiInsight={bestAi} />
+            <KPICard title="Best kWh/Part" value={best!.energy_per_part} unit="kWh" variant="success" aiInsight={bestMetricAi} />
+            <KPICard title="Worst Machine" value={worst!.name} icon={<TrendingDown className="h-4 w-4" />} variant="warning" aiInsight={worstAi} />
+            <KPICard title="Worst kWh/Part" value={worst!.energy_per_part} unit="kWh" variant="warning" aiInsight={worstMetricAi} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

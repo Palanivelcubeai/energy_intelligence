@@ -36,6 +36,12 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    // Keep AI mode enabled globally so KPI cards always expose AI insights.
+    localStorage.setItem("ai_mode_enabled", "1");
+    window.dispatchEvent(new CustomEvent("ai-mode-changed", { detail: { enabled: true } }));
+  }, []);
+
   const handleLogout = () => {
     logout();
     navigate("/login", { replace: true });

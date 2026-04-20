@@ -25,6 +25,8 @@ function hasAny(text, words) {
 }
 
 function detectIntent(message) {
+  // Natural chat mode: do not force rule-based intent routing.
+  // The LLM receives full evidence and responds conversationally.
   return "natural_chat";
 }
 
@@ -75,6 +77,18 @@ function parseJsonObject(text) {
   }
 
   return null;
+}
+
+function cleanAnswerText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+
+  return raw
+    .replace(/```(?:json)?/gi, " ")
+    .replace(/```/g, " ")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function formatPct(value) {
@@ -271,6 +285,8 @@ function buildDeterministicAnswer(question, intent, evidence, machineId) {
   if (lines.length === 0) {
     if (intent === "greeting") {
       lines.push("Hi. I can help with live plant metrics. Ask about production, energy, rejects, efficiency, PF, machine status, or machine issues.");
+    } else if (intent === "identity") {
+      lines.push("I am your realtime CNC plant copilot. I analyze live production, energy, reject, efficiency, and machine status data to answer operational questions.");
     } else if (intent === "smalltalk_status") {
       lines.push("I am doing well and ready to help with live plant data. You can ask anything about production, energy, rejects, efficiency, or machine health.");
     } else if (intent === "smalltalk_thanks") {
@@ -295,6 +311,42 @@ function buildDeterministicAnswer(question, intent, evidence, machineId) {
 
 function buildNaturalFallbackAnswer(question, evidence, machineId) {
   const q = String(question || "").toLowerCase();
+  const provider = getChatProvider();
+  const modelName = getChatModel();
+  const providerLabel = "Ollama";
+
+  if (/\b(compare|comparison|vs|versus|difference between)\b/.test(q)) {
+    const a = evidence.compareMachines?.a;
+    const b = evidence.compareMachines?.b;
+    if (a && b) {
+      const betterEff = a.avg_efficiency >= b.avg_efficiency ? a.id : b.id;
+      const higherReject = a.reject_rate_pct >= b.reject_rate_pct ? a.id : b.id;
+      const higherEnergy = a.kwh_today >= b.kwh_today ? a.id : b.id;
+      return `Comparison ${a.id} vs ${b.id}: production ${a.parts_today} vs ${b.parts_today} parts, rejects ${formatPct(a.reject_rate_pct)}% vs ${formatPct(b.reject_rate_pct)}%, energy ${a.kwh_today} vs ${b.kwh_today} kWh, efficiency ${a.avg_efficiency}% vs ${b.avg_efficiency}%. ${betterEff} is currently stronger on efficiency, while ${higherReject} carries higher reject risk and ${higherEnergy} is drawing more energy.`;
+    }
+
+    return "I can compare machines directly if you mention both IDs, for example: compare CNC-2 and CNC-3.";
+  }
+
+  if (/\b(model name|which model|what model|gemma|model are you using|model using|model in use|using which model|what model are you using|model right now)\b/.test(q)) {
+    return `Chat Assist is currently using ${providerLabel} with model ${modelName}.`;
+  }
+
+  if (/\b(hi|hello|hey)\b/.test(q)) {
+    return "Hi. I am your realtime CNC plant copilot. Ask me anything about production, energy, rejects, efficiency, or machine status.";
+  }
+
+  if (/\b(help|what can you do)\b/.test(q)) {
+    return "I can help with live plant operations. Try asking: total production today, total energy today, highest energy machine, least efficient machine, reject status, or compare CNC-2 and CNC-3.";
+  }
+
+  if (/\b(bye|goodbye|see you)\b/.test(q)) {
+    return "Got it. I am here anytime you need a live plant update.";
+  }
+
+  if (/\b(who are you|what are you|who r you|introduce yourself)\b/.test(q)) {
+    return "I am your realtime CNC plant copilot. I can answer questions about production, energy, rejects, efficiency, power factor, and machine health using live plant data.";
+  }
 
   if (/\b(how are you|how r you|how're you|how you doing|how is it going)\b/.test(q)) {
     const focusMachine = evidence.issueMachine?.id || evidence.lowEfficiency?.id || "the current bottleneck machine";
@@ -305,6 +357,58 @@ function buildNaturalFallbackAnswer(question, evidence, machineId) {
     return "You're welcome. I am ready to continue with realtime production, energy, quality, or machine performance questions.";
   }
 
+  if (/\b(least efficient|lowest efficiency|low efficiency machine|worst efficiency)\b/.test(q)) {
+    if (evidence.lowEfficiency) {
+      return `Lowest efficiency machine today is ${evidence.lowEfficiency.id} at ${evidence.lowEfficiency.avg_efficiency}% efficiency.`;
+    }
+  }
+
+  if (/\b(highest energy|top energy|energy consumer|most energy)\b/.test(q)) {
+    if (evidence.topEnergy) {
+      return `Highest energy machine today is ${evidence.topEnergy.id} at ${evidence.topEnergy.kwh_today} kWh.`;
+    }
+  }
+
+  if (/\b(highest reject|most rejects|reject machine)\b/.test(q)) {
+    if (evidence.topReject) {
+      return `Highest reject machine today is ${evidence.topReject.id} at ${formatPct(evidence.topReject.reject_rate_pct)}% reject rate.`;
+    }
+  }
+
+  if (/\b(total production|production today|how many parts)\b/.test(q)) {
+    return `Total plant production today is ${evidence.totals?.parts_today_total || 0} parts.`;
+  }
+
+  if (/\b(total energy|energy consumption|kwh today)\b/.test(q)) {
+    return `Total plant energy consumption today is ${evidence.totals?.kwh_today_total || 0} kWh.`;
+  }
+
+  if (/\b(reduce rejects|lower rejects|cut rejects|improve quality|reduce rejection|reject reduction)\b/.test(q)) {
+    const targetMachine = evidence.topReject?.id || evidence.issueMachine?.id || evidence.lowEfficiency?.id || "the highest-risk machine";
+    const rejectRate = evidence.topReject ? formatPct(evidence.topReject.reject_rate_pct) : null;
+    const machinePart = rejectRate
+      ? `${targetMachine} is currently the main reject driver at ${rejectRate}% reject rate.`
+      : `${targetMachine} is currently the main reject driver.`;
+
+    return `${machinePart} Start with first-piece validation and tooling inspection on ${targetMachine}, then tighten setup parameters and run operator checklist verification for the next 2 hours.`;
+  }
+
+  if (/\b(total rejects|rejects today|rejection today)\b/.test(q)) {
+    return `Total rejects today are ${evidence.totals?.rejects_total || 0} parts.`;
+  }
+
+  if (/\b(which machine has issues|issues right now|problem machine|highest-risk machine)\b/.test(q)) {
+    if (evidence.issueMachine) {
+      return `Highest issue-risk machine right now is ${evidence.issueMachine.id}.`;
+    }
+  }
+
+  if (/\b(what should i focus on this shift|focus this shift|priority this shift|what to do first|first priority)\b/.test(q)) {
+    const focusMachine = evidence.issueMachine?.id || evidence.lowEfficiency?.id || "the highest-risk machine";
+    const topEnergyMachine = evidence.topEnergy?.id || "top energy machine";
+    return `First priority this shift is stabilizing ${focusMachine}. Then reduce idle-cycle energy on ${topEnergyMachine}, and run setup recovery actions on ${focusMachine}.`;
+  }
+
   if (machineId && evidence.machine) {
     return `${machineId} right now: ${evidence.machine.parts_today} parts, ${formatPct(evidence.machine.reject_rate_pct)}% reject rate, ${evidence.machine.kwh_today} kWh, ${evidence.machine.avg_efficiency}% efficiency, status ${String(evidence.machine.status || "unknown").toLowerCase()}.`;
   }
@@ -312,6 +416,15 @@ function buildNaturalFallbackAnswer(question, evidence, machineId) {
   const worst = evidence.issueMachine?.id || evidence.lowEfficiency?.id || "N/A";
   const topEnergy = evidence.topEnergy?.id || "N/A";
   return `From live data right now: ${evidence.totals?.parts_today_total || 0} parts produced, ${evidence.totals?.kwh_today_total || 0} kWh consumed, ${evidence.totals?.rejects_total || 0} rejects, average efficiency ${formatPct(evidence.totals?.avg_efficiency_plant || 0)}%. Current highest-risk machine is ${worst}; highest energy consumer is ${topEnergy}.`;
+}
+
+function resolveFallbackAnswer(question, intent, evidence, machineId) {
+  if (intent !== "natural_chat") {
+    const targeted = buildDeterministicAnswer(question, intent, evidence, machineId);
+    if (targeted && targeted.trim()) return targeted;
+  }
+
+  return buildNaturalFallbackAnswer(question, evidence, machineId);
 }
 
 function normalizeHistory(history) {
@@ -327,38 +440,209 @@ function normalizeHistory(history) {
     .slice(-12);
 }
 
-async function polishWithOllama(question, evidence, fallbackAnswer, fallbackSuggestions, history = []) {
-  const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b";
+function getChatModel() {
+  return process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "gemma4";
+}
 
-  const systemPrompt = [
+function getChatProvider() {
+  return "ollama";
+}
+
+function isStrictRealtimeChat() {
+  return String(process.env.CHAT_ASSIST_STRICT_REALTIME || "false").trim().toLowerCase() === "true";
+}
+
+function getActiveChatModel(provider) {
+  return getChatModel();
+}
+
+function getChatTemperature() {
+  const temp = toNum(process.env.CHAT_ASSIST_TEMPERATURE, 0.35);
+  return Math.max(0, Math.min(1, temp));
+}
+
+function getChatTimeoutMs() {
+  return Math.max(3000, Math.min(20000, Math.round(toNum(process.env.CHAT_ASSIST_TIMEOUT_MS, 12000))));
+}
+
+function getChatMaxTokens() {
+  return Math.max(80, Math.min(600, Math.round(toNum(process.env.AI_MAX_TOKENS, 160))));
+}
+
+function getChatStreamMaxTokens() {
+  const envValue = process.env.CHAT_ASSIST_STREAM_MAX_TOKENS;
+  if (envValue != null && String(envValue).trim() !== "") {
+    return Math.max(40, Math.min(260, Math.round(toNum(envValue, 120))));
+  }
+
+  return Math.max(40, Math.min(180, Math.round(getChatMaxTokens() * 0.75)));
+}
+
+function shouldPreferDeterministicReply(message) {
+  const q = String(message || "").toLowerCase();
+  if (!q) return true;
+
+  if (q.length <= 64) {
+    return true;
+  }
+
+  return /\b(hi|hello|hey|help|thanks|thank you|thx|bye|goodbye|model name|which model|what model|who are you|how are you|least efficient|lowest efficiency|highest energy|top energy|most energy|highest reject|total production|production today|total energy|energy consumption|kwh today|total rejects|rejects today|problem machine|issues right now|first priority|focus this shift|compare|vs|versus)\b/.test(q);
+}
+
+function extractTextFromContent(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && typeof item.text === "string") return item.text;
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
+function buildChatPrompts(question, evidence, fallbackAnswer, fallbackSuggestions, includeJsonOnly = false, strictRealtime = false) {
+  const systemParts = [
     "You are a realtime industrial copilot for CNC operations.",
     "Respond naturally like a modern chat assistant.",
     "Use only the provided evidence. Do not invent numbers.",
-    "Return ONLY valid JSON object.",
-    "Schema: {\"answer\":string,\"suggestions\":string[]}",
+    "If the user sends a greeting or small-talk message, reply conversationally and briefly without defaulting to plant KPI summary.",
     "Answer in natural conversational tone and include useful context from evidence.",
+    "If the user asks a direct KPI question (least efficient, highest energy, total production, total rejects, machine issues), answer that exact question in the first sentence with machine ID and metric.",
+    "If the user asks for shift focus or priority, provide the top 2-3 prioritized operational actions with machine names.",
+    "If the user asks to compare two machines, always give a direct side-by-side comparison with both machine IDs and clear winner/risk callouts.",
     "Do not ask user to rephrase into short/specific format.",
-    "Suggestions must be practical and action-oriented and concise.",
+  ];
+
+  if (includeJsonOnly) {
+    systemParts.push("Return ONLY valid JSON object.");
+    systemParts.push('Schema: {"answer":string,"suggestions":string[]}');
+    systemParts.push("Suggestions must be practical and action-oriented and concise.");
+  }
+
+  const systemPrompt = systemParts.join(" ");
+  const userPromptParts = [
+    `Current user message: ${question}`,
+    `Evidence: ${JSON.stringify(evidence)}`,
+    "Use chat history context when relevant, but prioritize latest user message.",
+  ];
+
+  if (!strictRealtime) {
+    userPromptParts.push(`Fallback answer: ${fallbackAnswer}`);
+    userPromptParts.push(`Fallback suggestions: ${JSON.stringify(fallbackSuggestions || [])}`);
+  }
+
+  const userPrompt = userPromptParts.join("\n");
+
+  return { systemPrompt, userPrompt };
+}
+
+function clampInt(value, min, max) {
+  const rounded = Math.round(toNum(value, min));
+  return Math.max(min, Math.min(max, rounded));
+}
+
+function normalizePlanSection(value, fallbackItems) {
+  const list = Array.isArray(value)
+    ? value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim())
+    : [];
+
+  if (list.length > 0) {
+    return [...new Set(list)].slice(0, 4);
+  }
+
+  return fallbackItems.slice(0, 4);
+}
+
+function buildDeterministicStrategyPlan(evidence, goal, horizonDays) {
+  const topReject = evidence?.topReject;
+  const topEnergy = evidence?.topEnergy;
+  const lowEfficiency = evidence?.lowEfficiency;
+  const totals = evidence?.totals || {};
+
+  const rejectRate = toNum(totals.reject_rate_pct, 0);
+  const kwhToday = toNum(totals.kwh_today_total, 0);
+  const projectedKwh = Math.round(kwhToday * horizonDays * 10) / 10;
+  const currentEfficiency = toNum(totals.avg_efficiency_plant, 0);
+  const projectedEfficiency = Math.min(99, Math.round((currentEfficiency + 2.5) * 10) / 10);
+
+  const suggestions = [
+    topReject
+      ? `Run first-piece validation and tool wear check on ${topReject.id} in the next shift.`
+      : "Run first-piece validation on all active machines this shift.",
+    topEnergy
+      ? `Audit idle-cycle ratio and standby losses on ${topEnergy.id}.`
+      : "Audit idle-cycle ratio on the top 2 energy-consuming machines.",
+    lowEfficiency
+      ? `Prioritize setup recovery playbook for ${lowEfficiency.id} to reduce quality drift.`
+      : "Prioritize setup recovery on the lowest efficiency machine each shift.",
+    `Track progress against the goal: ${goal}.`,
+  ];
+
+  const recommendations = [
+    topReject
+      ? `Create a 24-hour corrective action ticket for ${topReject.id} with reject and process parameters attached.`
+      : "Create a 24-hour corrective action ticket for reject trend outliers.",
+    "Add a shift-wise review of reject rate, kWh per part, and efficiency in the production standup.",
+    "Escalate machines with power factor below 0.90 to maintenance-electrical checklist.",
+    "Use operator checklist sign-off before machine restart after tooling change.",
+  ];
+
+  const predictions = [
+    `Next ${horizonDays} days: projected energy usage is about ${projectedKwh} kWh if current load pattern remains stable.`,
+    rejectRate > 0
+      ? `If reject rate stays near ${rejectRate}%, scrap-related losses are likely to remain elevated this week.`
+      : `If reject rate remains near zero, output quality should stay stable this week.`,
+    `Plant efficiency can move from ${currentEfficiency}% to around ${projectedEfficiency}% with consistent shift controls.`,
+    topEnergy
+      ? `${topEnergy.id} is likely to remain the primary demand contributor unless idle runtime is reduced.`
+      : "Current top load machine is likely to remain demand leader without schedule balancing.",
+  ];
+
+  const ideas = [
+    "Pilot an AI-guided shift handover summary that auto-highlights anomalies and action owners.",
+    "Create a weekly challenge KPI: reduce kWh/part by 3% with operator reward tracking.",
+    "Use dynamic machine pairing: pair high-reject jobs with the most stable machines first.",
+    "Launch a predictive maintenance sprint focused on heat, PF, and reject co-occurrence patterns.",
+  ];
+
+  return {
+    suggestions: suggestions.slice(0, 4),
+    recommendations: recommendations.slice(0, 4),
+    predictions: predictions.slice(0, 4),
+    ideas: ideas.slice(0, 4),
+  };
+}
+
+function buildStrategyPrompts(goal, evidence, fallbackPlan, horizonDays) {
+  const systemPrompt = [
+    "You are an industrial AI strategy copilot for CNC plant operations.",
+    "Use only the provided evidence and practical operations logic.",
+    "Return ONLY valid JSON with concise, actionable text.",
+    'Schema: {"suggestions":string[],"recommendations":string[],"predictions":string[],"ideas":string[]}',
+    "Each array must contain 2-4 items and each item must be a single sentence.",
   ].join(" ");
 
   const userPrompt = [
-    `Current user message: ${question}`,
+    `Goal: ${goal}`,
+    `Prediction horizon (days): ${horizonDays}`,
     `Evidence: ${JSON.stringify(evidence)}`,
-    `Fallback answer: ${fallbackAnswer}`,
-    `Fallback suggestions: ${JSON.stringify(fallbackSuggestions)}`,
-    "Use chat history context when relevant, but prioritize latest user message.",
+    `Deterministic fallback plan: ${JSON.stringify(fallbackPlan)}`,
+    "Generate realistic, plant-operator-friendly outputs.",
   ].join("\n");
 
-  const normalizedHistory = normalizeHistory(history);
-  const messages = [
-    { role: "system", content: systemPrompt },
-    ...normalizedHistory,
-    { role: "user", content: userPrompt },
-  ];
+  return { systemPrompt, userPrompt };
+}
+
+async function buildStrategyWithOllama(goal, evidence, fallbackPlan, horizonDays) {
+  const model = getChatModel();
+  const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
+  const { systemPrompt, userPrompt } = buildStrategyPrompts(goal, evidence, fallbackPlan, horizonDays);
 
   const controller = new AbortController();
-  const timeoutMs = Math.max(5000, toNum(process.env.CHAT_ASSIST_TIMEOUT_MS, 12000));
+  const timeoutMs = getChatTimeoutMs();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -367,11 +651,80 @@ async function polishWithOllama(question, evidence, fallbackAnswer, fallbackSugg
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
+        think: false,
         stream: false,
         format: "json",
         options: {
-          temperature: 0.4,
-          num_predict: 260,
+          temperature: 0.3,
+          num_predict: 320,
+        },
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return fallbackPlan;
+    }
+
+    const payload = await response.json();
+    const content = payload?.message?.content || "";
+    const parsed = parseJsonObject(content);
+
+    return {
+      suggestions: normalizePlanSection(parsed?.suggestions, fallbackPlan.suggestions),
+      recommendations: normalizePlanSection(parsed?.recommendations, fallbackPlan.recommendations),
+      predictions: normalizePlanSection(parsed?.predictions, fallbackPlan.predictions),
+      ideas: normalizePlanSection(parsed?.ideas, fallbackPlan.ideas),
+    };
+  } catch {
+    return fallbackPlan;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function polishWithOllama(question, evidence, fallbackAnswer, fallbackSuggestions, history = [], options = {}) {
+  const strictRealtime = options.strictRealtime === true;
+  const model = getChatModel();
+  const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
+  const { systemPrompt, userPrompt } = buildChatPrompts(
+    question,
+    evidence,
+    fallbackAnswer,
+    fallbackSuggestions,
+    true,
+    strictRealtime
+  );
+
+  const normalizedHistory = normalizeHistory(history);
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...normalizedHistory,
+    { role: "user", content: userPrompt },
+  ];
+  const temperature = getChatTemperature();
+  const maxTokens = getChatMaxTokens();
+
+  const controller = new AbortController();
+  const timeoutMs = getChatTimeoutMs();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${ollamaUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        think: false,
+        stream: false,
+        format: "json",
+        options: {
+          temperature,
+          num_predict: maxTokens,
         },
         messages,
       }),
@@ -379,13 +732,24 @@ async function polishWithOllama(question, evidence, fallbackAnswer, fallbackSugg
     });
 
     if (!response.ok) {
+      if (strictRealtime) return null;
       return { answer: fallbackAnswer, suggestions: fallbackSuggestions };
     }
 
     const payload = await response.json();
     const content = payload?.message?.content || "";
     const parsed = parseJsonObject(content);
-    if (!parsed) return { answer: fallbackAnswer, suggestions: fallbackSuggestions };
+    if (!parsed) {
+      const plainAnswer = cleanAnswerText(content);
+      if (plainAnswer) {
+        return {
+          answer: plainAnswer,
+          suggestions: strictRealtime ? [] : fallbackSuggestions,
+        };
+      }
+      if (strictRealtime) return null;
+      return { answer: fallbackAnswer, suggestions: fallbackSuggestions };
+    }
 
     const answer = typeof parsed.answer === "string" && parsed.answer.trim()
       ? parsed.answer.trim()
@@ -394,35 +758,25 @@ async function polishWithOllama(question, evidence, fallbackAnswer, fallbackSugg
       ? parsed.suggestions.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim()).slice(0, 4)
       : fallbackSuggestions;
 
+    if (strictRealtime && !answer) return null;
+
     return {
       answer,
-      suggestions: suggestions.length ? suggestions : fallbackSuggestions,
+      suggestions: suggestions.length ? suggestions : (strictRealtime ? [] : fallbackSuggestions),
     };
   } catch {
+    if (strictRealtime) return null;
     return { answer: fallbackAnswer, suggestions: fallbackSuggestions };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function streamAnswerWithOllama(question, evidence, fallbackAnswer, history = [], onToken) {
+async function streamAnswerWithOllama(question, evidence, fallbackAnswer, history = [], onToken, options = {}) {
+  const strictRealtime = options.strictRealtime === true;
+  const model = getChatModel();
   const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b";
-
-  const systemPrompt = [
-    "You are a realtime industrial copilot for CNC operations.",
-    "Respond naturally like a modern chat assistant.",
-    "Use only the provided evidence. Do not invent numbers.",
-    "Answer in natural conversational tone and include useful context from evidence.",
-    "Do not ask user to rephrase into short/specific format.",
-  ].join(" ");
-
-  const userPrompt = [
-    `Current user message: ${question}`,
-    `Evidence: ${JSON.stringify(evidence)}`,
-    `Fallback answer: ${fallbackAnswer}`,
-    "Use chat history context when relevant, but prioritize latest user message.",
-  ].join("\n");
+  const { systemPrompt, userPrompt } = buildChatPrompts(question, evidence, fallbackAnswer, [], false, strictRealtime);
 
   const normalizedHistory = normalizeHistory(history);
   const messages = [
@@ -432,7 +786,7 @@ async function streamAnswerWithOllama(question, evidence, fallbackAnswer, histor
   ];
 
   const controller = new AbortController();
-  const timeoutMs = Math.max(5000, toNum(process.env.CHAT_ASSIST_TIMEOUT_MS, 12000));
+  const timeoutMs = getChatTimeoutMs();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -441,10 +795,11 @@ async function streamAnswerWithOllama(question, evidence, fallbackAnswer, histor
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
+        think: false,
         stream: true,
         options: {
           temperature: 0.4,
-          num_predict: 260,
+          num_predict: getChatStreamMaxTokens(),
         },
         messages,
       }),
@@ -452,6 +807,7 @@ async function streamAnswerWithOllama(question, evidence, fallbackAnswer, histor
     });
 
     if (!response.ok || !response.body) {
+      if (strictRealtime) return null;
       return fallbackAnswer;
     }
 
@@ -488,8 +844,10 @@ async function streamAnswerWithOllama(question, evidence, fallbackAnswer, histor
     }
 
     const finalAnswer = full.trim();
+    if (strictRealtime && !finalAnswer) return null;
     return finalAnswer || fallbackAnswer;
   } catch {
+    if (strictRealtime) return null;
     return fallbackAnswer;
   } finally {
     clearTimeout(timeout);
@@ -499,7 +857,7 @@ async function streamAnswerWithOllama(question, evidence, fallbackAnswer, histor
 async function buildChatContext(message) {
   const machineId = extractMachineId(message);
   const machineIds = extractMachineIds(message);
-  const intent = "natural_chat";
+  const intent = detectIntent(message);
   const snapshot = await getMachineTodaySnapshot(machineId);
   const allSnapshot = machineId ? await getMachineTodaySnapshot(null) : snapshot;
 
@@ -579,7 +937,7 @@ async function buildChatContext(message) {
     "Ask me to compare any two machines for a direct side-by-side view.",
   ].filter(Boolean).slice(0, 4);
 
-  const fallbackAnswer = buildNaturalFallbackAnswer(message, evidence, machineId);
+  const fallbackAnswer = resolveFallbackAnswer(message, intent, evidence, machineId);
 
   return {
     intent,
@@ -599,7 +957,7 @@ router.post("/ask", async (req, res) => {
     const machineId = extractMachineId(message);
     const machineIds = extractMachineIds(message);
     const history = req.body?.history;
-    const intent = "natural_chat";
+    const intent = detectIntent(message);
     const snapshot = await getMachineTodaySnapshot(machineId);
     const allSnapshot = machineId ? await getMachineTodaySnapshot(null) : snapshot;
 
@@ -679,12 +1037,38 @@ router.post("/ask", async (req, res) => {
       "Ask me to compare any two machines for a direct side-by-side view.",
     ].filter(Boolean).slice(0, 4);
 
-    const fallbackAnswer = buildNaturalFallbackAnswer(message, evidence, machineId);
+    const fallbackAnswer = resolveFallbackAnswer(message, intent, evidence, machineId);
     const aiEnabled = String(process.env.CHAT_ASSIST_AI_ENABLED || "true").toLowerCase() !== "false";
+    const strictRealtime = isStrictRealtimeChat();
+    const provider = getChatProvider();
+    const deterministicFastPath = shouldPreferDeterministicReply(message);
+    let runtimeModel = getActiveChatModel(provider);
+    const unavailableNotice = "Realtime AI is temporarily unavailable. Please retry in a few seconds.";
 
-    const finalResponse = aiEnabled
-      ? await polishWithOllama(message, evidence, fallbackAnswer, fallbackSuggestions, history)
-      : { answer: fallbackAnswer, suggestions: fallbackSuggestions };
+    if (strictRealtime && !aiEnabled) {
+      return res.json({
+        answer: unavailableNotice,
+        suggestions: [],
+        intent,
+        provider,
+        model: runtimeModel,
+      });
+    }
+
+    let finalResponse = { answer: fallbackAnswer, suggestions: fallbackSuggestions };
+    if (aiEnabled && !deterministicFastPath) {
+      finalResponse = await polishWithOllama(message, evidence, fallbackAnswer, fallbackSuggestions, history, { strictRealtime });
+    }
+
+    if (strictRealtime && (!finalResponse || !String(finalResponse.answer || "").trim())) {
+      return res.json({
+        answer: unavailableNotice,
+        suggestions: [],
+        intent,
+        provider,
+        model: runtimeModel,
+      });
+    }
 
     const includeEvidence =
       req.body?.includeEvidence === true ||
@@ -692,8 +1076,10 @@ router.post("/ask", async (req, res) => {
 
     const payload = {
       answer: finalResponse.answer,
-      suggestions: finalResponse.suggestions,
+      suggestions: strictRealtime ? (finalResponse.suggestions || []) : finalResponse.suggestions,
       intent,
+      provider,
+      model: runtimeModel,
     };
 
     if (includeEvidence) {
@@ -729,26 +1115,92 @@ router.post("/ask-stream", async (req, res) => {
     const history = req.body?.history;
     const { intent, evidence, fallbackSuggestions, fallbackAnswer } = await buildChatContext(message);
     const aiEnabled = String(process.env.CHAT_ASSIST_AI_ENABLED || "true").toLowerCase() !== "false";
+    const strictRealtime = isStrictRealtimeChat();
+    const provider = getChatProvider();
+    const deterministicFastPath = shouldPreferDeterministicReply(message);
+    let runtimeModel = getActiveChatModel(provider);
+    const unavailableNotice = "Realtime AI is temporarily unavailable. Please retry in a few seconds.";
+    let tokenCount = 0;
 
-    let answer = fallbackAnswer;
-    if (aiEnabled) {
-      answer = await streamAnswerWithOllama(message, evidence, fallbackAnswer, history, (token) => {
-        sendEvent("token", { token });
+    if (strictRealtime && !aiEnabled) {
+      sendEvent("token", { token: unavailableNotice });
+      sendEvent("done", {
+        answer: unavailableNotice,
+        suggestions: [],
+        intent,
+        provider,
+        model: runtimeModel,
       });
+      return res.end();
+    }
+
+    let answer = strictRealtime ? null : fallbackAnswer;
+    if (aiEnabled && !deterministicFastPath) {
+      answer = await streamAnswerWithOllama(message, evidence, fallbackAnswer, history, (token) => {
+          tokenCount += 1;
+          sendEvent("token", { token });
+        }, { strictRealtime });
     } else {
       sendEvent("token", { token: fallbackAnswer });
+      tokenCount += 1;
+    }
+
+    if (strictRealtime && tokenCount === 0 && !answer) {
+      sendEvent("token", { token: unavailableNotice });
+      sendEvent("done", {
+        answer: unavailableNotice,
+        suggestions: [],
+        intent,
+        provider,
+        model: runtimeModel,
+      });
+      return res.end();
+    }
+
+    if (tokenCount === 0 && answer) {
+      sendEvent("token", { token: answer });
     }
 
     sendEvent("done", {
       answer,
-      suggestions: fallbackSuggestions,
+      suggestions: strictRealtime ? [] : fallbackSuggestions,
       intent,
+      provider,
+      model: runtimeModel,
     });
     return res.end();
   } catch (err) {
     console.error("POST /chat-assist/ask-stream error:", err);
     sendEvent("error", { message: "Unable to stream chat response." });
     return res.end();
+  }
+});
+
+router.post("/strategy", async (req, res) => {
+  try {
+    const goal = String(req.body?.goal || "Improve plant quality and energy efficiency").trim();
+    const horizonDays = clampInt(req.body?.horizonDays, 1, 90);
+    const provider = getChatProvider();
+    const aiEnabled = String(process.env.CHAT_ASSIST_AI_ENABLED || "true").toLowerCase() !== "false";
+
+    const { evidence } = await buildChatContext(goal);
+    const fallbackPlan = buildDeterministicStrategyPlan(evidence, goal, horizonDays);
+
+    let finalPlan = fallbackPlan;
+    if (aiEnabled) {
+      finalPlan = await buildStrategyWithOllama(goal, evidence, fallbackPlan, horizonDays);
+    }
+
+    return res.json({
+      goal,
+      horizonDays,
+      provider,
+      generatedAt: new Date().toISOString(),
+      ...finalPlan,
+    });
+  } catch (err) {
+    console.error("POST /chat-assist/strategy error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 

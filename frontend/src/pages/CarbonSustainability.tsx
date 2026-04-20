@@ -34,6 +34,7 @@ interface CO2Machine { name: string; co2: number; kwh: number }
 interface CarbonInsight { severity: 'warning' | 'success' | 'info'; message: string; carbonReduction: string; financialImpact: string; recommendation: string }
 
 export default function CarbonSustainability() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [metrics, setMetrics] = useState<CarbonMetrics>({ totalCO2Today: 0, totalCO2Month: 0, carbonIntensity: 0, renewablePercent: 0, carbonSaved: 0, sustainabilityScore: 0 });
   const [co2Trend, setCo2Trend] = useState<CO2Trend[]>([]);
   const [co2ByMachine, setCo2ByMachine] = useState<CO2Machine[]>([]);
@@ -64,6 +65,71 @@ export default function CarbonSustainability() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
+  }, []);
+
+  const co2Delta = carbonComparison?.co2.percentChange ?? 0;
+  const intensityDelta = carbonComparison?.carbonIntensity.percentChange ?? 0;
+
+  const co2TodayAi = !aiModeEnabled
+    ? undefined
+    : co2Delta < 0
+      ? {
+          type: "Prediction" as const,
+          text: "CO2 is trending down vs yesterday. Sustained reject control can maintain this reduction.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "CO2 is increasing. Prioritize high-energy machines and reduce idle runtime in current shift.",
+        };
+
+  const intensityAi = !aiModeEnabled
+    ? undefined
+    : intensityDelta < 0
+      ? {
+          type: "Recommendation" as const,
+          text: "Carbon intensity is improving. Keep quality yield stable to lock in per-part emission gains.",
+        }
+      : {
+          type: "Recommendation" as const,
+          text: "Carbon intensity is worsening. Tune process efficiency on low-yield, high-kWh machines first.",
+        };
+
+  const renewableAi = !aiModeEnabled
+    ? undefined
+    : {
+        type: "Idea" as const,
+        text: "Track renewable share by shift to correlate with demand windows and emission outcomes.",
+      };
+
+  const sustainabilityAi = !aiModeEnabled
+    ? undefined
+    : metrics.sustainabilityScore >= 70
+      ? {
+          type: "Prediction" as const,
+          text: "Current sustainability trajectory is stable. Weekly audit can preserve the score trend.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Sustainability score is below target. Prioritize energy-intensity and reject-rate improvements.",
+        };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -83,7 +149,9 @@ export default function CarbonSustainability() {
           value={metrics.totalCO2Today.toFixed(1)} 
           unit="kg" 
           icon={<Factory className="h-4 w-4" />} 
+          trendGoodDirection="down"
           trend={carbonComparison ? { value: carbonComparison.co2.percentChange, label: 'vs yesterday' } : undefined}
+          aiInsight={co2TodayAi}
         />
         <KPICard title="CO₂ This Month" value={metrics.totalCO2Month.toFixed(2)} unit="tons" icon={<Leaf className="h-4 w-4" />} />
         <KPICard 
@@ -91,11 +159,13 @@ export default function CarbonSustainability() {
           value={metrics.carbonIntensity.toFixed(3)} 
           unit="kg/part" 
           icon={<Gauge className="h-4 w-4" />} 
-          trend={carbonComparison ? { value: carbonComparison.carbonIntensity.percentChange, label: 'improving' } : undefined}
+          trendGoodDirection="down"
+          trend={carbonComparison ? { value: carbonComparison.carbonIntensity.percentChange, label: 'vs yesterday' } : undefined}
+          aiInsight={intensityAi}
         />
-        <KPICard title="Renewable %" value={metrics.renewablePercent} unit="%" icon={<Sun className="h-4 w-4" />} variant="success" />
+        <KPICard title="Renewable %" value={metrics.renewablePercent} unit="%" icon={<Sun className="h-4 w-4" />} variant="success" aiInsight={renewableAi} />
         <KPICard title="Carbon Saved" value={metrics.carbonSaved.toFixed(1)} unit="kg" icon={<Recycle className="h-4 w-4" />} variant="success" />
-        <KPICard title="Sustainability" value={metrics.sustainabilityScore} unit="/100" icon={<Award className="h-4 w-4" />} variant={metrics.sustainabilityScore >= 70 ? 'success' : 'warning'} />
+        <KPICard title="Sustainability" value={metrics.sustainabilityScore} unit="/100" icon={<Award className="h-4 w-4" />} variant={metrics.sustainabilityScore >= 70 ? 'success' : 'warning'} aiInsight={sustainabilityAi} />
       </div>
 
       {/* Charts Row 1 */}

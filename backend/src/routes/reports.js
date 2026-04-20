@@ -81,6 +81,32 @@ function normalizeTimestamps(value) {
   return toIsoSecondsIfTimestampString(value);
 }
 
+function getNarrativeModel() {
+  return process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "gemma4";
+}
+
+function getNarrativeProvider() {
+  return "ollama";
+}
+
+function getNarrativeProviderLabel() {
+  return "Gemma 4 via Ollama";
+}
+
+function extractTextFromContent(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && typeof item.text === "string") return item.text;
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
 function winsorizedMean(values, lowerQuantile = 0.1, upperQuantile = 0.9) {
   const nums = (values || []).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
   if (nums.length === 0) return 0;
@@ -613,13 +639,22 @@ async function getPeakDemandReport() {
 
 async function getCostOptimizationReport() {
   const { rows } = await pool.query(
-    `SELECT m.name AS machine,
+    `WITH date_choice AS (
+       SELECT CASE
+         WHEN EXISTS (SELECT 1 FROM energy_output_daily WHERE record_date = CURRENT_DATE)
+           THEN CURRENT_DATE
+         ELSE (SELECT MAX(record_date) FROM energy_output_daily)
+       END AS report_date
+     )
+     SELECT m.name AS machine,
+            dc.report_date AS as_of_date,
             ROUND(COALESCE(e.energy_kwh, 0) * sc.tariff_per_kwh) AS energy_cost,
             ROUND(COALESCE(e.idle_hours, 0) * CASE WHEN m.status != 'maintenance' THEN 3.2 ELSE 0 END * sc.tariff_per_kwh) AS idle_cost,
             ROUND(COALESCE(e.idle_hours, 0) * CASE WHEN m.status != 'maintenance' THEN 3.2 ELSE 0 END * sc.tariff_per_kwh * 0.7
               + COALESCE(e.energy_kwh, 0) * sc.tariff_per_kwh * 0.08) AS potential_savings
      FROM machines m
-     LEFT JOIN energy_output_daily e ON e.machine_id = m.id AND e.record_date = CURRENT_DATE
+     CROSS JOIN date_choice dc
+     LEFT JOIN energy_output_daily e ON e.machine_id = m.id AND e.record_date = dc.report_date
      CROSS JOIN system_config sc
      ORDER BY m.id`
   );
@@ -698,11 +733,14 @@ async function getIntelligenceSummaryReport() {
 }
 
 async function buildNarrativeWithQwen(payload) {
+  const provider = getNarrativeProvider();
   const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-  const model = process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b";
+  const model = getNarrativeModel();
   const controller = new AbortController();
   const timeoutMs = Math.max(3000, toNum(process.env.INTELLIGENCE_REPORT_AI_TIMEOUT_MS, 9000));
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+  const aiProviderLabel = getNarrativeProviderLabel();
 
   const fallback = {
     executiveSummary:
@@ -710,7 +748,7 @@ async function buildNarrativeWithQwen(payload) {
       `Plant is running ${payload.kpis.runningMachines}/${payload.kpis.totalMachines} machines, with average efficiency ${payload.kpis.avgEfficiency}% and reject rate ${payload.kpis.rejectRatePct}%. ` +
       `Recent trend shows production ${payload.kpis.productionTrendLabel} and energy ${payload.kpis.energyTrendLabel}.`,
     sectionSummaries: [
-      { heading: "AI Usage", summary: "The platform uses Qwen via Ollama for natural language insights and recommendations grounded on realtime plant evidence." },
+      { heading: "AI Usage", summary: `The platform uses ${aiProviderLabel} for natural language insights and recommendations grounded on realtime plant evidence.` },
       { heading: "Machine Operations", summary: "Machine KPIs are continuously summarized from latest metrics to track efficiency, rejects, utilization, and power quality." },
       { heading: "Prediction Quality", summary: "Prediction health combines confidence, freshness, and recent backtest behavior to estimate reliability." },
     ],
@@ -786,13 +824,14 @@ async function buildNarrativeWithQwen(payload) {
 }
 
 function buildFallbackNarrative(payload) {
+  const aiProviderLabel = getNarrativeProviderLabel();
   return {
     executiveSummary:
       `AI monitoring is ${payload.aiAccuracy.overall >= 80 ? "strong" : "active"} with estimated overall intelligence accuracy at ${payload.aiAccuracy.overall}%. ` +
       `Plant is running ${payload.kpis.runningMachines}/${payload.kpis.totalMachines} machines, with average efficiency ${payload.kpis.avgEfficiency}% and reject rate ${payload.kpis.rejectRatePct}%. ` +
       `Recent trend shows production ${payload.kpis.productionTrendLabel} and energy ${payload.kpis.energyTrendLabel}.`,
     sectionSummaries: [
-      { heading: "AI Usage", summary: "The platform uses Qwen via Ollama for natural language insights and recommendations grounded on realtime plant evidence." },
+      { heading: "AI Usage", summary: `The platform uses ${aiProviderLabel} for natural language insights and recommendations grounded on realtime plant evidence.` },
       { heading: "Machine Operations", summary: "Machine KPIs are continuously summarized from latest metrics to track efficiency, rejects, utilization, and power quality." },
       { heading: "Prediction Quality", summary: "Prediction health combines confidence, freshness, and recent backtest behavior to estimate reliability." },
     ],
@@ -802,6 +841,39 @@ function buildFallbackNarrative(payload) {
       "Track prediction backtest metrics daily and recalibrate thresholds when hit rate declines.",
     ],
   };
+}
+
+function deriveDailyTrendDelta(series, todayValue, valueKey) {
+  const points = Array.isArray(series) ? series : [];
+  if (points.length === 0) return null;
+
+  const todayKey = new Date().toISOString().slice(5, 10);
+  const last = points[points.length - 1] || null;
+  const prev = points.length >= 2 ? points[points.length - 2] : null;
+
+  // Preferred path: compare today against immediate previous day when today's row is present.
+  if (last && prev && String(last.day || "") === todayKey) {
+    const prevVal = toNum(prev[valueKey], 0);
+    const lastVal = toNum(last[valueKey], 0);
+    const likelyStaleToday = lastVal <= 0 && toNum(todayValue, 0) > 0;
+    const currentVal = likelyStaleToday ? toNum(todayValue, 0) : lastVal;
+    if (prevVal > 0) {
+      return ((currentVal - prevVal) / prevVal) * 100;
+    }
+  }
+
+  // Fallback path: compare reliable current KPI against most recent historical point.
+  const baseline = toNum(last?.[valueKey], 0);
+  if (baseline > 0) {
+    return ((toNum(todayValue, 0) - baseline) / baseline) * 100;
+  }
+
+  return null;
+}
+
+function toTrendLabel(deltaPct) {
+  if (!Number.isFinite(deltaPct)) return "insufficient current-day trend data";
+  return `${Math.round(deltaPct)}% vs previous day`;
 }
 
 async function getIntelligenceSummaryDocument(options = {}) {
@@ -1067,22 +1139,16 @@ async function getIntelligenceSummaryDocument(options = {}) {
       return b.rejectRate - a.rejectRate;
     });
 
-  const dayDelta = productionEnergyTrend.length >= 2
-    ? ((productionEnergyTrend[productionEnergyTrend.length - 1].production - productionEnergyTrend[productionEnergyTrend.length - 2].production) /
-        Math.max(1, productionEnergyTrend[productionEnergyTrend.length - 2].production)) * 100
-    : 0;
-  const energyDayDelta = productionEnergyTrend.length >= 2
-    ? ((productionEnergyTrend[productionEnergyTrend.length - 1].energy - productionEnergyTrend[productionEnergyTrend.length - 2].energy) /
-        Math.max(1, productionEnergyTrend[productionEnergyTrend.length - 2].energy)) * 100
-    : 0;
+  const dayDelta = deriveDailyTrendDelta(productionEnergyTrend, totalParts, "production");
+  const energyDayDelta = deriveDailyTrendDelta(productionEnergyTrend, totalEnergy, "energy");
 
   const kpiPayload = {
     totalMachines: Number(status.total_machines || 0),
     runningMachines: Number(status.running_machines || 0),
     avgEfficiency: Math.round(avgEfficiencyRaw),
     rejectRatePct: Math.round(rejectRateRaw * 10) / 10,
-    productionTrendLabel: `${Math.round(dayDelta)}% vs previous day`,
-    energyTrendLabel: `${Math.round(energyDayDelta)}% vs previous day`,
+    productionTrendLabel: toTrendLabel(dayDelta),
+    energyTrendLabel: toTrendLabel(energyDayDelta),
     overallAccuracy,
   };
 
@@ -1165,7 +1231,7 @@ async function getIntelligenceSummaryDocument(options = {}) {
     generatedAt: nowIso,
     lastIngestionAt,
     cacheTtlSeconds: Math.round(INTELLIGENCE_DOC_CACHE_TTL_MS / 1000),
-    modelUsed: process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b",
+    modelUsed: getNarrativeModel(),
     executiveSummary: narrative.executiveSummary,
     sectionSummaries: narrative.sectionSummaries,
     recommendations: narrative.recommendations,

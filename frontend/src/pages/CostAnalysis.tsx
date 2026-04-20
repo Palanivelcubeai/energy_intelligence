@@ -26,6 +26,7 @@ interface CostBreakdown {
 }
 
 export default function CostAnalysis() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [costData, setCostData] = useState<CostBreakdown>({ energyRate: 8.5, demandCharge: 350, contractDemand: 85, machines: [] });
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
@@ -39,6 +40,25 @@ export default function CostAnalysis() {
     fetchCostBreakdown();
     const interval = setInterval(fetchCostBreakdown, 15000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
   }, []);
 
   const totalDailyCostRaw = costData.machines.reduce((s, m) => s + m.energyCost, 0);
@@ -70,6 +90,52 @@ export default function CostAnalysis() {
     : 0;
   const top2Names = top2.map(m => m.id).join(' and ');
 
+  const idleRatio = totalDailyCostRaw > 0 ? (totalIdleCostRaw / totalDailyCostRaw) * 100 : 0;
+  const demandOvershootKva = (costData.billingPeakDemandKVA ?? costData.peakDemandKVA ?? 0) - Number(costData.contractDemand || 0);
+
+  const todayCostAi = !aiModeEnabled
+    ? undefined
+    : totalDailyCost >= 3000
+      ? {
+          type: "Suggestion" as const,
+          text: "Daily energy cost is elevated. Prioritize high-load CNC run discipline and idle shutdown control this shift.",
+        }
+      : {
+          type: "Prediction" as const,
+          text: "Current cost trend is stable. If utilization stays similar, end-of-day cost should remain within normal band.",
+        };
+
+  const monthlyAi = !aiModeEnabled
+    ? undefined
+    : {
+        type: "Prediction" as const,
+        text: `Projected monthly spend is around ₹${monthlyEstimate.toLocaleString()}. Reducing idle waste can materially lower final billing.`,
+      };
+
+  const demandAi = !aiModeEnabled
+    ? undefined
+    : demandOvershootKva > 0
+      ? {
+          type: "Recommendation" as const,
+          text: `Demand is above contract by ~${demandOvershootKva.toFixed(1)} kVA. Shift staggering is recommended to limit demand penalties.`,
+        }
+      : {
+          type: "Idea" as const,
+          text: "Demand is within contract range. Keep peak-window monitoring to preserve demand-charge efficiency.",
+        };
+
+  const idleAi = !aiModeEnabled
+    ? undefined
+    : idleRatio >= 20
+      ? {
+          type: "Recommendation" as const,
+          text: `Idle share is high (~${idleRatio.toFixed(0)}%). Focus first on ${top2Names || "top idle-loss machines"} to recover avoidable cost.`,
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Idle cost ratio is manageable. Maintain machine stop/start discipline to prevent cost drift.",
+        };
+
   const costPerMachine = costData.machines.map(c => ({
     name: c.id,
     energyCost: c.energyCost,
@@ -88,11 +154,18 @@ export default function CostAnalysis() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KPICard title="Today's Energy Cost" value={`₹${totalDailyCost.toLocaleString()}`} icon={<IndianRupee className="h-4 w-4" />} variant="primary" />     
+        <KPICard
+          title="Today's Energy Cost"
+          value={`₹${totalDailyCost.toLocaleString()}`}
+          icon={<IndianRupee className="h-4 w-4" />}
+          variant="primary"
+          aiInsight={todayCostAi}
+        />
         <KPICard 
           title="Monthly Actual" 
           value={`₹${monthlyEstimate.toLocaleString()}`}
           subtitle={costData.actualMonthlyCost ? "Month-to-date" : "Est. (26 days)"}
+          aiInsight={monthlyAi}
         />
         <KPICard 
           title="Demand Charge" 
@@ -100,6 +173,7 @@ export default function CostAnalysis() {
           subtitle={costData.billingPeakDemandKVA
             ? `Billing peak (MTD): ${costData.billingPeakDemandKVA} kVA`
             : (costData.peakDemandKVA ? `Peak: ${costData.peakDemandKVA} kVA` : `Contract: ${costData.contractDemand} kVA`)}
+          aiInsight={demandAi}
         />
         <KPICard
           title="Idle Waste Cost"
@@ -107,6 +181,7 @@ export default function CostAnalysis() {
           subtitle="Today"
           icon={<TrendingDown className="h-4 w-4" />}
           variant="destructive"
+          aiInsight={idleAi}
         />
       </div>
 

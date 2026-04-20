@@ -11,6 +11,7 @@ import {
 const tt = { contentStyle: { backgroundColor: '#ffffff', border: '1px solid hsl(215, 20%, 80%)', borderRadius: '8px', color: '#1a1a2e', fontSize: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }, itemStyle: { color: '#1a1a2e' }, labelStyle: { color: '#1a1a2e', fontWeight: 600 } };
 
 export default function ProductionAnalytics() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [machines, setMachines] = useState<MachineData[]>([]);
   const [shiftProduction, setShiftProduction] = useState<Record<string, unknown>[]>([]);
   const [weeklyData, setWeeklyData] = useState<{ record_date?: string; day?: string; production: number }[]>([]);
@@ -33,6 +34,25 @@ export default function ProductionAnalytics() {
     fetchProduction();
     const interval = setInterval(fetchProduction, 5000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
   }, []);
 
   // Recompute weekly chart data whenever machines (targets) or raw weekly data changes
@@ -93,7 +113,49 @@ export default function ProductionAnalytics() {
   const totalParts = machines.reduce((s, m) => s + m.parts_produced, 0);
   const totalRejected = machines.reduce((s, m) => s + m.rejection_count, 0);
   const totalTarget = machines.reduce((s, m) => s + (m.production_target || 0), 0);
+  const rejectionRate = totalParts > 0 ? (totalRejected / totalParts) * 100 : 0;
   const targetAchievement = totalTarget > 0 ? ((totalParts / totalTarget) * 100).toFixed(1) : "--";
+
+  const totalPartsAi = !aiModeEnabled ? undefined : {
+    type: "Prediction" as const,
+    text: "If current machine utilization holds, production throughput should remain stable for the next cycle.",
+  };
+
+  const rejectedAi = !aiModeEnabled
+    ? undefined
+    : rejectionRate > 5
+      ? {
+          type: "Recommendation" as const,
+          text: "Rejects are elevated. Run first-piece validation and tool-condition checks on top reject contributors.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Reject trend is acceptable. Maintain process controls to preserve quality yield.",
+        };
+
+  const rejectRateAi = !aiModeEnabled
+    ? undefined
+    : rejectionRate > 5
+      ? {
+          type: "Prediction" as const,
+          text: "Without intervention, rejection rate may increase under high-load shift conditions.",
+        }
+      : {
+          type: "Idea" as const,
+          text: "Use this quality window to benchmark optimal parameter settings across machines.",
+        };
+
+  const targetAi = !aiModeEnabled
+    ? undefined
+    : Number(targetAchievement) >= 100
+      ? {
+          type: "Recommendation" as const,
+          text: "Target is being achieved. Sustain by monitoring cycle-time variation and planned stoppages.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Target achievement is below plan. Focus on downtime and bottleneck machine balancing.",
+        };
 
   return (
     <div className="space-y-6">
@@ -103,10 +165,10 @@ export default function ProductionAnalytics() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KPICard title="Total Parts Today" value={totalParts} icon={<Package className="h-4 w-4" />} variant="primary" />
-        <KPICard title="Rejected Parts" value={totalRejected} variant="destructive" />
-        <KPICard title="Rejection Rate" value={totalParts > 0 ? ((totalRejected / totalParts) * 100).toFixed(1) : "0.0"} unit="%" />
-        <KPICard title="Target Achievement" value={targetAchievement} unit="%" icon={<Target className="h-4 w-4" />} variant="success" />
+        <KPICard title="Total Parts Today" value={totalParts} icon={<Package className="h-4 w-4" />} variant="primary" aiInsight={totalPartsAi} />
+        <KPICard title="Rejected Parts" value={totalRejected} variant="destructive" aiInsight={rejectedAi} />
+        <KPICard title="Rejection Rate" value={totalParts > 0 ? ((totalRejected / totalParts) * 100).toFixed(1) : "0.0"} unit="%" aiInsight={rejectRateAi} />
+        <KPICard title="Target Achievement" value={targetAchievement} unit="%" icon={<Target className="h-4 w-4" />} variant="success" aiInsight={targetAi} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

@@ -30,7 +30,7 @@ interface MaintenanceMachine {
     heatC: number;
     powerKw: number;
     powerLoadPct: number;
-    powerPerPartKwh: number;
+    powerPerPartKwh: number | null;
     healthScore: number;
     vibrationMmS: number;
   };
@@ -82,6 +82,7 @@ function getMachineOrderIndex(machineId: string): number {
 }
 
 export default function PredictiveMaintenance() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [data, setData] = useState<PredictiveResponse>({
     summary: { totalMachines: 0, criticalCount: 0, highCount: 0, dueSoonCount: 0, avgRiskScore: 0, avgHealth: 0, avgConfidence: 0 },
     machines: [],
@@ -120,6 +121,25 @@ export default function PredictiveMaintenance() {
     };
   }, []);
 
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
+  }, []);
+
   const sortedMachines = useMemo(
     () => [...data.machines].sort((a, b) => getMachineOrderIndex(a.id) - getMachineOrderIndex(b.id)),
     [data.machines]
@@ -131,6 +151,54 @@ export default function PredictiveMaintenance() {
     healthScore: m.conditions.healthScore,
     riskLevel: m.riskLevel,
   }));
+
+  const criticalAi = !aiModeEnabled
+    ? undefined
+    : data.summary.criticalCount > 0
+      ? {
+          type: "Recommendation" as const,
+          text: "Critical machines detected. Prioritize immediate inspection and controlled load operation.",
+        }
+      : {
+          type: "Prediction" as const,
+          text: "No critical machine currently. Continue proactive checks to keep risk in low band.",
+        };
+
+  const highRiskAi = !aiModeEnabled
+    ? undefined
+    : data.summary.highCount > 0
+      ? {
+          type: "Suggestion" as const,
+          text: "High-risk machines are present. Verify vibration and thermal drift before next cycle.",
+        }
+      : {
+          type: "Idea" as const,
+          text: "Use this low-risk window to tune thresholds and improve model calibration.",
+        };
+
+  const avgRiskAi = !aiModeEnabled
+    ? undefined
+    : data.summary.avgRiskScore >= 60
+      ? {
+          type: "Prediction" as const,
+          text: "Average risk may escalate if current anomaly persistence continues into next shift.",
+        }
+      : {
+          type: "Recommendation" as const,
+          text: "Risk baseline is moderate/low. Maintain preventive checks and monitor top factors.",
+        };
+
+  const confidenceAi = !aiModeEnabled
+    ? undefined
+    : data.summary.avgConfidence >= 75
+      ? {
+          type: "Prediction" as const,
+          text: "Model confidence is healthy. AI advisories are reliable for maintenance planning support.",
+        }
+      : {
+          type: "Suggestion" as const,
+          text: "Confidence is limited. Cross-check alerts with manual diagnostics before action.",
+        };
 
   return (
     <div className="space-y-6">
@@ -148,12 +216,14 @@ export default function PredictiveMaintenance() {
           value={data.summary.criticalCount}
           icon={<ShieldAlert className="h-4 w-4" />}
           variant={data.summary.criticalCount > 0 ? "destructive" : "success"}
+          aiInsight={criticalAi}
         />
         <KPICard
           title="High Risk Machines"
           value={data.summary.highCount}
           icon={<AlertTriangle className="h-4 w-4" />}
           variant={data.summary.highCount > 0 ? "warning" : "success"}
+          aiInsight={highRiskAi}
         />
         <KPICard
           title="Due This Week"
@@ -167,6 +237,7 @@ export default function PredictiveMaintenance() {
           unit="/100"
           icon={<Activity className="h-4 w-4" />}
           variant={data.summary.avgRiskScore >= 60 ? "warning" : "primary"}
+          aiInsight={avgRiskAi}
         />
         <KPICard
           title="Average Health"
@@ -181,6 +252,7 @@ export default function PredictiveMaintenance() {
           unit="%"
           icon={<Activity className="h-4 w-4" />}
           variant={data.summary.avgConfidence >= 75 ? "success" : "warning"}
+          aiInsight={confidenceAi}
         />
       </div>
 
@@ -228,7 +300,11 @@ export default function PredictiveMaintenance() {
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
               <Metric label="Heat" value={`${m.conditions.heatC} °C`} />
               <Metric label="Power" value={`${m.conditions.powerKw} kW`} sub={`${m.conditions.powerLoadPct}% load`} />
-              <Metric label="Power/Part" value={`${m.conditions.powerPerPartKwh.toFixed(3)} kWh`} />
+              <Metric
+                label="Power/Part"
+                value={m.conditions.powerPerPartKwh == null ? "N/A" : `${m.conditions.powerPerPartKwh.toFixed(3)} kWh`}
+                sub={m.conditions.powerPerPartKwh == null ? "No parts produced in latest sample" : undefined}
+              />
               <Metric label="Health" value={`${m.conditions.healthScore}/100`} />
               <Metric label="Vibration" value={`${m.conditions.vibrationMmS} mm/s`} />
             </div>
@@ -243,8 +319,8 @@ export default function PredictiveMaintenance() {
               <span className="font-medium text-foreground">Data quality:</span> {m.confidencePct}% confidence • latest sample {m.signalMeta.lastSampleAgoMinutes} min ago
             </div>
             {m.alerts.length > 0 && (
-              <div className="mt-2 text-xs text-warning">
-                <span className="font-medium">Alerts:</span> {m.alerts.join(" • ")}
+              <div className={`mt-2 text-xs ${m.riskLevel === "Low" ? "text-muted-foreground" : "text-warning"}`}>
+                <span className="font-medium">{m.riskLevel === "Low" ? "Advisories:" : "Alerts:"}</span> {m.alerts.join(" • ")}
               </div>
             )}
           </div>

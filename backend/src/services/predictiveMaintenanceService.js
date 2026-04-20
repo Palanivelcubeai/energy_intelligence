@@ -12,6 +12,14 @@ function safePercent(numerator, denominator) {
   return (numerator / denominator) * 100;
 }
 
+function median(values) {
+  const nums = (values || []).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (nums.length === 0) return 0;
+  const mid = Math.floor(nums.length / 2);
+  if (nums.length % 2 === 0) return (nums[mid - 1] + nums[mid]) / 2;
+  return nums[mid];
+}
+
 function computeRiskFromSignals(signals) {
   const heatRisk = clamp(((signals.heatC - 55) / 35) * 100, 0, 100);
   const powerRisk = clamp(((signals.powerLoadPct - 80) / 35) * 100, 0, 100);
@@ -118,6 +126,16 @@ async function getPredictiveMaintenancePayload(pool) {
      ORDER BY m.id`
   );
 
+  const measuredPowerPerPartSamples = rows
+    .map((r) => {
+      const produced = toNumber(r.parts_produced, 0);
+      if (produced <= 0) return null;
+      return toNumber(r.kwh, 0) / produced;
+    })
+    .filter((v) => Number.isFinite(v) && v > 0);
+  const fleetPowerPerPartBaseline = median(measuredPowerPerPartSamples);
+  const highPowerPerPartThreshold = Math.max(0.55, fleetPowerPerPartBaseline * 1.25);
+
   const machinePredictions = rows.map((r) => {
     const ratedPowerKw = toNumber(r.rated_power_kw, 1);
     const machineHeatThresholdC = toNumber(r.heat_threshold_c, heatThresholdC);
@@ -143,9 +161,12 @@ async function getPredictiveMaintenancePayload(pool) {
     const currentImbalancePct = clamp(safePercent(maxCurrentDev, Math.max(1, avgCurrent)), 0, 100);
 
     const powerLoadPct = clamp((powerKw / Math.max(0.1, ratedPowerKw)) * 100, 0, 140);
-    const powerPerPartKwh = partsProduced > 0
+    const hasPartsData = partsProduced > 0;
+    const measuredPowerPerPartKwh = hasPartsData
       ? Math.round((toNumber(r.kwh, 0) / partsProduced) * 1000) / 1000
-      : Math.round((toNumber(r.kwh, 0) * 1000));
+      : null;
+    // Use a neutral baseline when no parts were produced to avoid artificial risk spikes.
+    const powerPerPartForRisk = hasPartsData ? measuredPowerPerPartKwh : 0.32;
 
     const recordedAtMs = r.recorded_at ? new Date(r.recorded_at).getTime() : Date.now();
     const prevRecordedAtMs = r.prev_recorded_at ? new Date(r.prev_recorded_at).getTime() : recordedAtMs;
@@ -172,14 +193,14 @@ async function getPredictiveMaintenancePayload(pool) {
     const currentSignals = {
       heatC,
       powerLoadPct,
-      powerPerPartKwh,
+      powerPerPartKwh: powerPerPartForRisk,
       healthScore,
       vibrationMmS,
     };
     const prevSignals = {
       heatC: Math.round(clamp(34 + (clamp((prevPowerKw / Math.max(0.1, ratedPowerKw)) * 100, 0, 140) * 0.32) + (avgCurrent * 0.35) + (prevRuntimeHours * 0.2), 30, 125)),
       powerLoadPct: clamp((prevPowerKw / Math.max(0.1, ratedPowerKw)) * 100, 0, 140),
-      powerPerPartKwh,
+      powerPerPartKwh: powerPerPartForRisk,
       healthScore: prevHealthScore,
       vibrationMmS,
     };
@@ -223,10 +244,10 @@ async function getPredictiveMaintenancePayload(pool) {
     const alerts = [];
     if (heatC >= machineHeatThresholdC) alerts.push("High machine heat detected");
     if (powerLoadPct >= 110) alerts.push("Power draw exceeding rated load");
-    if (powerPerPartKwh >= 0.55) alerts.push("Power consumed per part is high");
+    if (hasPartsData && measuredPowerPerPartKwh >= highPowerPerPartThreshold) alerts.push("Power consumed per part is high");
     if (vibrationMmS >= 4.5) alerts.push("Vibration above safe threshold");
     if (healthScore <= 65) alerts.push("Machine health score is low");
-    if (riskDelta >= 8) alerts.push("Risk trend rising rapidly");
+    if (riskDelta >= 12 && riskScore >= 35) alerts.push("Risk trend rising rapidly");
 
     return {
       id: r.id,
@@ -245,7 +266,7 @@ async function getPredictiveMaintenancePayload(pool) {
         heatC,
         powerKw: Math.round(powerKw * 100) / 100,
         powerLoadPct: Math.round(powerLoadPct),
-        powerPerPartKwh,
+        powerPerPartKwh: measuredPowerPerPartKwh,
         healthScore,
         vibrationMmS: Math.round(vibrationMmS * 100) / 100,
       },

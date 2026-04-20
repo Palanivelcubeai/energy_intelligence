@@ -27,6 +27,12 @@ function parseJsonObject(text) {
   return null;
 }
 
+function getDemandModelCandidates() {
+  const primary = process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "gemma4";
+  const fallback = process.env.OLLAMA_RUNTIME_FALLBACK_MODEL || "gemma4";
+  return Array.from(new Set([primary, fallback].filter(Boolean)));
+}
+
 function calculateFallbackPeakPrediction(points, contractDemand) {
   const safePoints = Array.isArray(points) ? points : [];
   const currentDemand = safePoints.length ? toNum(safePoints[safePoints.length - 1].demand, 0) : 0;
@@ -226,9 +232,7 @@ router.get("/ai-prediction", async (_req, res) => {
     const fallback = calculateFallbackPeakPrediction(baselinePoints, contractDemand);
 
     const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
-    const model = process.env.OLLAMA_CHAT_MODEL || process.env.OLLAMA_MODEL || "qwen2.5:7b";
-    const runtimeFallbackModel = process.env.OLLAMA_RUNTIME_FALLBACK_MODEL || "qwen2.5:3b";
-    const modelCandidates = Array.from(new Set([model, runtimeFallbackModel].filter(Boolean)));
+    const modelCandidates = getDemandModelCandidates();
     const timeoutMs = Math.max(8000, Number.parseInt(process.env.DEMAND_AI_TIMEOUT_MS || "18000", 10) || 18000);
 
     const systemPrompt = [

@@ -166,6 +166,22 @@ function demandStatusClass(status?: string) {
   return 'text-success';
 }
 
+function formatModelName(modelUsed: string) {
+  const raw = String(modelUsed || '').trim().toLowerCase();
+  if (!raw) return 'Unknown';
+  if (raw.includes('gemma-4')) return 'Gemma 4';
+  if (raw.includes('qwen2.5')) return 'Qwen 2.5';
+  if (raw.includes('deepseek')) return 'DeepSeek';
+
+  const withoutProvider = raw.includes('/') ? raw.split('/').pop() || raw : raw;
+  return withoutProvider
+    .replace(/:free$/i, '')
+    .replace(/-it$/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (m) => m.toUpperCase())
+    .trim();
+}
+
 function deltaLabel(delta: number | undefined, lowerIsBetter = false) {
   const d = Number(delta || 0);
   if (Math.abs(d) < 0.05) return '→ 0.0';
@@ -218,6 +234,8 @@ function DemandBacktestTooltip({ active, payload, label }: { active?: boolean; p
 }
 
 export default function IntelligenceReportDocument({ data }: { data: IntelligenceReportDocumentData }) {
+  const displayModelName = useMemo(() => formatModelName(data.modelUsed), [data.modelUsed]);
+
   const demandChartData = useMemo(() => {
     const source = Array.isArray(data.charts.demandAccuracyTrend) ? data.charts.demandAccuracyTrend : [];
     const now = new Date();
@@ -260,7 +278,7 @@ export default function IntelligenceReportDocument({ data }: { data: Intelligenc
       <section className="rounded-lg border border-border/60 bg-background/50 p-4">
         <h3 className="text-lg font-semibold text-foreground">{data.title}</h3>
         <p className="text-xs text-muted-foreground mt-1">
-          Generated: {new Date(data.generatedAt).toLocaleString()} | Model: {data.modelUsed}
+          Generated: {new Date(data.generatedAt).toLocaleString()} | Model: {displayModelName}
         </p>
         <p className="text-sm text-foreground/90 mt-3 leading-relaxed">{data.executiveSummary}</p>
       </section>

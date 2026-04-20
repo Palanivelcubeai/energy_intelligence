@@ -16,6 +16,7 @@ interface PQData {
 }
 
 export default function PowerQuality() {
+  const [aiModeEnabled, setAiModeEnabled] = useState<boolean>(() => localStorage.getItem("ai_mode_enabled") === "1");
   const [powerQualityData, setPowerQualityData] = useState<PQData[]>([]);
 
   useEffect(() => {
@@ -27,9 +28,65 @@ export default function PowerQuality() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const syncAiMode = () => setAiModeEnabled(localStorage.getItem("ai_mode_enabled") === "1");
+    const onCustomChange = (event: Event) => {
+      const custom = event as CustomEvent<{ enabled?: boolean }>;
+      if (typeof custom.detail?.enabled === "boolean") {
+        setAiModeEnabled(custom.detail.enabled);
+        return;
+      }
+      syncAiMode();
+    };
+
+    window.addEventListener("storage", syncAiMode);
+    window.addEventListener("ai-mode-changed", onCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", syncAiMode);
+      window.removeEventListener("ai-mode-changed", onCustomChange as EventListener);
+    };
+  }, []);
+
   const activePQ = powerQualityData.filter(p => p.healthScore > 0);
   const avgPF = activePQ.length ? activePQ.reduce((s, d) => s + d.pf, 0) / activePQ.length : 0;
   const avgHealth = powerQualityData.length ? powerQualityData.reduce((s, d) => s + d.healthScore, 0) / powerQualityData.length : 0;
+  const pqAlerts = powerQualityData.filter((pq) => pq.thd > 5 || pq.pf < 0.9 || pq.voltageImbalance > 1.5).length;
+
+  const pfAi = !aiModeEnabled
+    ? undefined
+    : avgPF >= 0.9
+      ? {
+          type: "Prediction" as const,
+          text: "Power factor trend is healthy. Demand efficiency should stay stable if reactive load remains controlled.",
+        }
+      : {
+          type: "Recommendation" as const,
+          text: "Average PF is below target. Check compensation settings and reactive load distribution.",
+        };
+
+  const healthAi = !aiModeEnabled
+    ? undefined
+    : avgHealth >= 80
+      ? {
+          type: "Suggestion" as const,
+          text: "PQ health is good. Continue periodic THD and imbalance surveillance for early anomaly capture.",
+        }
+      : {
+          type: "Recommendation" as const,
+          text: "PQ health is moderate/low. Prioritize machines with concurrent THD and imbalance flags.",
+        };
+
+  const alertAi = !aiModeEnabled
+    ? undefined
+    : pqAlerts > 0
+      ? {
+          type: "Prediction" as const,
+          text: "Existing PQ alerts can impact reliability if unresolved in upcoming high-load periods.",
+        }
+      : {
+          type: "Idea" as const,
+          text: "No active PQ alerts. Use this baseline snapshot for preventive threshold tuning.",
+        };
 
   return (
     <div className="space-y-6">
@@ -39,10 +96,10 @@ export default function PowerQuality() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KPICard title="Avg Power Factor" value={avgPF.toFixed(2)} icon={<Gauge className="h-4 w-4" />} variant={avgPF >= 0.9 ? 'success' : 'warning'} />
-        <KPICard title="PQ Health Score" value={Math.round(avgHealth)} unit="/100" variant="primary" />
+        <KPICard title="Avg Power Factor" value={avgPF.toFixed(2)} icon={<Gauge className="h-4 w-4" />} variant={avgPF >= 0.9 ? 'success' : 'warning'} aiInsight={pfAi} />
+        <KPICard title="PQ Health Score" value={Math.round(avgHealth)} unit="/100" variant="primary" aiInsight={healthAi} />
         <KPICard title="Frequency" value="49.98" unit="Hz" variant="success" />
-        <KPICard title="PQ Alerts" value="2" icon={<AlertTriangle className="h-4 w-4" />} variant="warning" />
+        <KPICard title="PQ Alerts" value={pqAlerts} icon={<AlertTriangle className="h-4 w-4" />} variant={pqAlerts > 0 ? "warning" : "success"} aiInsight={alertAi} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

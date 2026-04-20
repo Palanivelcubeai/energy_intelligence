@@ -8,6 +8,11 @@ const insightsCache = new Map();
 const inflightInsights = new Map();
 let feedbackTableReady = false;
 let insightsTableReady = false;
+let lastInsightsRuntime = {
+  provider: null,
+  model: null,
+  updatedAt: null,
+};
 
 function getCacheTtlMs() {
   return Math.max(5000, toNum(process.env.INSIGHTS_CACHE_TTL_MS, 45000));
@@ -24,6 +29,11 @@ function getHttpTimeoutMs() {
 function toNum(value, fallback = 0) {
   const n = parseFloat(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function isAbortLikeError(err) {
+  const message = String(err?.message || err || "").toLowerCase();
+  return err?.name === "AbortError" || message.includes("aborted") || message.includes("timeout");
 }
 
 function clamp(value, min, max) {
@@ -218,13 +228,107 @@ function getInsightsNumPredict() {
   return Math.max(90, Math.min(220, Math.round(toNum(process.env.INSIGHTS_NUM_PREDICT, 120))));
 }
 
+function getInsightsProvider() {
+  return "ollama";
+}
+
+function extractTextFromContent(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && typeof item.text === "string") return item.text;
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
 function getInsightModels() {
-  const fallbackModel = process.env.OLLAMA_MODEL || "qwen2.5:7b";
+  const fallbackModel = process.env.OLLAMA_MODEL || "gemma4";
   return {
     fast: process.env.OLLAMA_FAST_MODEL || fallbackModel,
     quality: process.env.OLLAMA_QUALITY_MODEL || fallbackModel,
-    runtimeFallback: process.env.OLLAMA_RUNTIME_FALLBACK_MODEL || "qwen2.5:3b",
+    runtimeFallback: process.env.OLLAMA_RUNTIME_FALLBACK_MODEL || "gemma4",
   };
+}
+
+function getConfiguredInsightModel() {
+  const models = getInsightModels();
+  return String(models.fast || models.quality || models.runtimeFallback || "").trim();
+}
+
+function setLastInsightsRuntimeModel(provider, model) {
+  const normalizedProvider = String(provider || "").trim().toLowerCase();
+  const normalizedModel = String(model || "").trim();
+  if (!normalizedProvider || !normalizedModel) return;
+
+  lastInsightsRuntime = {
+    provider: normalizedProvider,
+    model: normalizedModel,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function getInsightsMetadata() {
+  const provider = getInsightsProvider();
+  const configuredModel = getConfiguredInsightModel();
+  const runtimeModel =
+    lastInsightsRuntime.provider === provider && typeof lastInsightsRuntime.model === "string"
+      ? lastInsightsRuntime.model
+      : null;
+
+  return {
+    provider,
+    model: runtimeModel || configuredModel,
+    updatedAt: runtimeModel ? lastInsightsRuntime.updatedAt : null,
+  };
+}
+
+async function requestInsightsCompletion(provider, payload, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434"}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: payload.model,
+        think: false,
+        stream: false,
+        keep_alive: process.env.OLLAMA_KEEP_ALIVE || "30m",
+        format: "json",
+        options: {
+          temperature: payload.temperature,
+          num_predict: payload.maxTokens,
+        },
+        messages: payload.messages,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        errorText: (await response.text()) || "",
+      };
+    }
+
+    const data = await response.json();
+    const content = data?.message?.content || "";
+
+    return {
+      ok: true,
+      status: response.status,
+      content,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function extractMachineIdFromText(text, knownMachineIds) {
@@ -900,6 +1004,7 @@ function calibrateInsights(insights, snapshot, historical) {
 
 async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {}) {
   const allowPartial = Boolean(options.allowPartial);
+  const provider = getInsightsProvider();
   const lookbackDays = Math.max(3, Math.min(60, Number.parseInt(process.env.INSIGHTS_LOOKBACK_DAYS || "14", 10) || 14));
   const [snapshot, historical] = await Promise.all([
     getPlantSnapshot(),
@@ -908,7 +1013,6 @@ async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {})
 
   const knownMachineIds = new Set(snapshot.map((m) => m.id));
 
-  const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
   const models = getInsightModels();
   const modeModel = mode === "quality" ? models.quality : models.fast;
   const modelCandidates = Array.from(new Set([modeModel, models.runtimeFallback].filter(Boolean)));
@@ -996,72 +1100,58 @@ async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {})
   ].join("\n");
 
   const collected = new Map();
+  let lastSuccessfulModel = modeModel;
 
   for (let generationAttempt = 0; generationAttempt < 3 && collected.size < candidateTarget; generationAttempt += 1) {
-    let response;
+    let completionRes = null;
     let selectedModel = modelCandidates[0];
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const controller = new AbortController();
       const attemptTimeoutMs = attempt === 0 ? ollamaTimeoutMs : Math.round(ollamaTimeoutMs * 1.5);
-      const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
-
       try {
         for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
           selectedModel = modelCandidates[modelIndex];
-          response = await fetch(`${ollamaUrl}/api/chat`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: selectedModel,
-              stream: false,
-              keep_alive: process.env.OLLAMA_KEEP_ALIVE || "30m",
-              format: "json",
-              options: {
-                temperature: 0.2,
-                num_predict: getInsightsNumPredict(),
-              },
-              messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt },
-              ],
-            }),
-            signal: controller.signal,
-          });
+          completionRes = await requestInsightsCompletion(provider, {
+            model: selectedModel,
+            temperature: 0.2,
+            maxTokens: getInsightsNumPredict(),
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+          }, attemptTimeoutMs);
 
-          if (response.ok) {
+          if (completionRes.ok) {
+            lastSuccessfulModel = selectedModel;
             if (modelIndex > 0) {
               console.warn(`Primary model unavailable, using fallback model: ${selectedModel}`);
             }
             break;
           }
 
-          const errorText = (await response.text()).toLowerCase();
-          const modelMissing = response.status === 404 || errorText.includes("model") && errorText.includes("not found");
+          const errorText = String(completionRes.errorText || "").toLowerCase();
+          const modelMissing = completionRes.status === 404 || (errorText.includes("model") && errorText.includes("not found"));
           if (!modelMissing || modelIndex === modelCandidates.length - 1) {
-            throw new Error(`Ollama HTTP ${response.status}: ${errorText.slice(0, 180)}`);
+            throw new Error(`${provider} HTTP ${completionRes.status}: ${errorText.slice(0, 180)}`);
           }
         }
 
-        break;
+        if (completionRes?.ok) break;
       } catch (err) {
         const isAbort = err && (err.name === "AbortError" || String(err.message || "").toLowerCase().includes("aborted"));
         if (!isAbort || attempt === 1) throw err;
-      } finally {
-        clearTimeout(timeout);
       }
     }
 
-    if (!response || !response.ok) {
-      throw new Error(`Ollama HTTP ${response?.status || "unknown"}`);
+    if (!completionRes || !completionRes.ok) {
+      throw new Error(`${provider} HTTP ${completionRes?.status || "unknown"}`);
     }
 
-    const payload = await response.json();
-    const content = payload?.message?.content || "";
+    const content = completionRes.content || "";
     const parsed = extractJsonArray(content);
 
     if (!Array.isArray(parsed) || parsed.length === 0) {
-      console.warn(`Ollama raw content (model=${selectedModel}, trimmed):`, String(content).slice(0, 500));
+      console.warn(`AI raw content (provider=${provider}, model=${selectedModel}, trimmed):`, String(content).slice(0, 500));
       continue;
     }
 
@@ -1117,7 +1207,6 @@ async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {})
       id: `ai-${index + 1}-${item.machine || "all"}`,
     }));
 
-  // Remove near-duplicate insights that differ only by minor wording/values.
   const deduped = [];
   const seenSignatures = new Set();
   for (const item of calibrated) {
@@ -1127,7 +1216,6 @@ async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {})
     deduped.push(item);
   }
 
-  // Prioritize one insight per machine first, then append remaining insights.
   const prioritized = [];
   const machineSeen = new Set();
   const leftovers = [];
@@ -1162,15 +1250,17 @@ async function generateLlamaInsightsWithMode(limit, mode = "fast", options = {})
       };
     });
 
+  setLastInsightsRuntimeModel(provider, lastSuccessfulModel);
+
   return finalInsights.slice(0, returnCount);
 }
 
 async function generateSimpleAiInsights(limit = 2) {
+  const provider = getInsightsProvider();
   const snapshot = await getPlantSnapshot();
   const feedbackAcceptedRate = await getFeedbackAcceptedRate30d();
   const knownMachineIds = new Set(snapshot.map((m) => m.id));
   const models = getInsightModels();
-  const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
   const modelCandidates = Array.from(new Set([models.fast, models.runtimeFallback].filter(Boolean)));
   const targetCount = Math.max(1, Math.min(limit || 2, 3));
 
@@ -1190,107 +1280,101 @@ async function generateSimpleAiInsights(limit = 2) {
   const timeoutMs = Math.max(8000, toNum(process.env.INSIGHTS_FAST_TIMEOUT_MS, 12000));
 
   for (const model of modelCandidates) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      let response;
+    let completionRes;
 
-      try {
-        response = await fetch(`${ollamaUrl}/api/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model,
-            stream: false,
-            format: "json",
-            options: {
-              temperature: 0.2,
-              num_predict: getInsightsNumPredict(),
-            },
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userPrompt },
-            ],
-          }),
-          signal: controller.signal,
-        });
-      } catch (err) {
-        const isAbort = err && (err.name === "AbortError" || String(err.message || "").toLowerCase().includes("aborted"));
-        if (isAbort) {
-          continue;
-        }
-        throw err;
-      } finally {
-        clearTimeout(timeout);
-      }
-
-      if (!response.ok) {
+    try {
+      completionRes = await requestInsightsCompletion(provider, {
+        model,
+        temperature: 0.2,
+        maxTokens: getInsightsNumPredict(),
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+      }, timeoutMs);
+    } catch (err) {
+      const isAbort = err && (err.name === "AbortError" || String(err.message || "").toLowerCase().includes("aborted"));
+      if (isAbort) {
         continue;
       }
+      throw err;
+    }
 
-      const payload = await response.json();
-      const content = String(payload?.message?.content || "").trim();
-      const parsed = extractJsonArray(content);
+    if (!completionRes?.ok) {
+      continue;
+    }
 
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        const normalized = parsed
-          .map((item, index) => normalizeInsight(item, index, knownMachineIds))
-          .filter(Boolean)
-          .map((item, index) => ({
+    const content = String(completionRes.content || "").trim();
+    const parsed = extractJsonArray(content);
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const normalized = parsed
+        .map((item, index) => normalizeInsight(item, index, knownMachineIds))
+        .filter(Boolean)
+        .map((item, index) => ({
+          ...item,
+          id: `ai-${index + 1}-${item.machine || "all"}`,
+        }));
+
+      const toppedUp = topUpInsightsWithSnapshot(normalized, snapshot, targetCount)
+        .map((item, index) => ({
+          ...item,
+          id: `ai-${index + 1}-${item.machine || "all"}`,
+        }))
+        .map((item) => {
+          const machineNow = item.machine ? snapshot.find((m) => m.id === item.machine) : null;
+          return {
             ...item,
-            id: `ai-${index + 1}-${item.machine || "all"}`,
-          }));
+            confidence: calculateInsightConfidence(item, machineNow, null, feedbackAcceptedRate),
+          };
+        });
 
-        const toppedUp = topUpInsightsWithSnapshot(normalized, snapshot, targetCount)
-          .map((item, index) => ({
-            ...item,
-            id: `ai-${index + 1}-${item.machine || "all"}`,
-          }))
-          .map((item) => {
-            const machineNow = item.machine ? snapshot.find((m) => m.id === item.machine) : null;
-            return {
-              ...item,
-              confidence: calculateInsightConfidence(item, machineNow, null, feedbackAcceptedRate),
-            };
-          });
-
-        if (toppedUp.length > 0) return toppedUp;
+      if (toppedUp.length > 0) {
+        setLastInsightsRuntimeModel(provider, model);
+        return toppedUp;
       }
+    }
 
-      // If model responded with text but invalid JSON, convert text into one AI insight.
-      if (content) {
-        const recoveredRaw = parseMalformedInsightContent(content, knownMachineIds);
-        const recovered = recoveredRaw
-          ? normalizeInsight(recoveredRaw, 0, knownMachineIds)
-          : null;
+    if (content) {
+      const recoveredRaw = parseMalformedInsightContent(content, knownMachineIds);
+      const recovered = recoveredRaw
+        ? normalizeInsight(recoveredRaw, 0, knownMachineIds)
+        : null;
 
-        const inferredMachine = extractMachineIdFromText(content, knownMachineIds);
-        const single = recovered
-          ? [recovered]
-          : [
-              {
-                id: `ai-1-${inferredMachine || "all"}`,
-                severity: "warning",
-                message: cleanDisplayText(content, "Potential issue detected from AI output."),
-                financial_impact: "Potential cost impact requires verification",
-                production_impact: "Potential production impact requires verification",
-                confidence: 72,
-                suggested_action: "Review machine metrics and validate this AI finding",
-                machine: inferredMachine,
-              },
-            ];
-        return topUpInsightsWithSnapshot(single, snapshot, targetCount)
-          .map((item, index) => ({
+      const inferredMachine = extractMachineIdFromText(content, knownMachineIds);
+      const single = recovered
+        ? [recovered]
+        : [
+            {
+              id: `ai-1-${inferredMachine || "all"}`,
+              severity: "warning",
+              message: cleanDisplayText(content, "Potential issue detected from AI output."),
+              financial_impact: "Potential cost impact requires verification",
+              production_impact: "Potential production impact requires verification",
+              confidence: 72,
+              suggested_action: "Review machine metrics and validate this AI finding",
+              machine: inferredMachine,
+            },
+          ];
+
+      const enriched = topUpInsightsWithSnapshot(single, snapshot, targetCount)
+        .map((item, index) => ({
+          ...item,
+          id: `ai-${index + 1}-${item.machine || "all"}`,
+        }))
+        .map((item) => {
+          const machineNow = item.machine ? snapshot.find((m) => m.id === item.machine) : null;
+          return {
             ...item,
-            id: `ai-${index + 1}-${item.machine || "all"}`,
-          }))
-          .map((item) => {
-            const machineNow = item.machine ? snapshot.find((m) => m.id === item.machine) : null;
-            return {
-              ...item,
-              confidence: calculateInsightConfidence(item, machineNow, null, feedbackAcceptedRate),
-            };
-          });
+            confidence: calculateInsightConfidence(item, machineNow, null, feedbackAcceptedRate),
+          };
+        });
+
+      if (enriched.length > 0) {
+        setLastInsightsRuntimeModel(provider, model);
       }
+      return enriched;
+    }
   }
 
   throw new Error("No AI insights parsed from simple fallback");
@@ -1317,21 +1401,58 @@ function refreshAiCache(cacheKey, limit, mode = "quality", options = {}) {
 }
 
 function startAiPrewarmLoop() {
+  const prewarmVerbose = String(process.env.INSIGHTS_PREWARM_VERBOSE || "false").trim().toLowerCase() === "true";
+  const prewarmEnabled = String(process.env.INSIGHTS_PREWARM_ENABLED || "true").trim().toLowerCase() !== "false";
+  if (!prewarmEnabled) {
+    if (prewarmVerbose) {
+      console.info("AI prewarm disabled by configuration (INSIGHTS_PREWARM_ENABLED=false).");
+    }
+    return;
+  }
+
+  const provider = getInsightsProvider();
+  const models = getInsightModels();
+  const activeModel = String(models.fast || models.quality || "").trim();
+  let prewarmBackoffUntil = 0;
+  let prewarmIntervalHandle = null;
+
   const runPrewarm = () => {
+    if (Date.now() < prewarmBackoffUntil) return;
+
     refreshAiCache("all", undefined, "fast", { allowPartial: true })
       .then((allFast) => {
         insightsCache.set("4", { data: allFast.slice(0, 4), createdAt: Date.now() });
+        prewarmBackoffUntil = 0;
       })
       .catch((err) => {
-        console.warn("AI prewarm all failed:", err.message || err);
+        const message = String(err?.message || err || "");
+        const isRateLimited = message.includes("HTTP 429") || message.toLowerCase().includes("rate limit");
+        const isAbort = isAbortLikeError(err);
+        if (isRateLimited) {
+          const backoffMs = Math.max(120000, toNum(process.env.INSIGHTS_PREWARM_BACKOFF_MS, 300000));
+          prewarmBackoffUntil = Date.now() + backoffMs;
+          console.warn(`AI prewarm rate-limited (HTTP 429). Backing off for ${Math.round(backoffMs / 1000)}s.`);
+          return;
+        }
+
+        if (isAbort) {
+          const timeoutBackoffMs = Math.max(90000, toNum(process.env.INSIGHTS_PREWARM_TIMEOUT_BACKOFF_MS, 180000));
+          prewarmBackoffUntil = Date.now() + timeoutBackoffMs;
+          if (prewarmVerbose) {
+            console.info(`AI prewarm timed out/aborted. Backing off for ${Math.round(timeoutBackoffMs / 1000)}s.`);
+          }
+          return;
+        }
+
+        console.warn("AI prewarm all failed:", message || err);
       });
   };
 
   const initialDelayMs = Math.max(15000, toNum(process.env.INSIGHTS_INITIAL_PREWARM_DELAY_MS, 20000));
   setTimeout(runPrewarm, initialDelayMs);
   const intervalMs = Math.max(getCacheTtlMs(), toNum(process.env.INSIGHTS_REFRESH_MS, 60000));
-  const handle = setInterval(runPrewarm, intervalMs);
-  if (typeof handle.unref === "function") handle.unref();
+  prewarmIntervalHandle = setInterval(runPrewarm, intervalMs);
+  if (typeof prewarmIntervalHandle.unref === "function") prewarmIntervalHandle.unref();
 }
 
 startAiPrewarmLoop();
@@ -1451,7 +1572,9 @@ async function generateInsights(limit) {
   // Serve stale cached AI results immediately and refresh in background.
   if (cached && now - cached.createdAt >= cacheTtlMs) {
     refreshAiCache(cacheKey, limit, "fast", { allowPartial: true }).catch((err) => {
-      console.warn("AI stale refresh failed:", err.message || err);
+      if (!isAbortLikeError(err)) {
+        console.warn("AI stale refresh failed:", err.message || err);
+      }
     });
 
     return cached.data;
@@ -1575,6 +1698,17 @@ router.get("/all", async (_req, res) => {
         }
       }
     }
+  }
+});
+
+// GET /api/insights/meta
+router.get("/meta", async (_req, res) => {
+  try {
+    const metadata = getInsightsMetadata();
+    return res.json(metadata);
+  } catch (err) {
+    console.error("GET /insights/meta error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
